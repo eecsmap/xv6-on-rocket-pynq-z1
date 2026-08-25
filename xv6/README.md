@@ -3,19 +3,52 @@
 Porting [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) to the Rocket core in
 the PL, driven by `fesvr-zynq` from ARM Linux on the PS.
 
-**Status:** the kernel boots and completes its entire init sequence, then stops
-at the first filesystem access — there is no block-device driver yet.
+**Status:** the kernel boots, mounts the filesystem off the testchipip block
+device, runs `init`, execs `sh`, and prints a prompt. Console **output** is
+fully working. Console **input** is not usable yet — see "Known problem" below.
 
 ```
-~ # cd /root && ./fesvr-zynq ./xv6-kernel
+~ # cd /root && ./fesvr-zynq +blkdev=fs.img ./xv6-kernel
 
 xv6 kernel is booting
 
-kinit → kvminit → kvminithart → procinit → trapinit → trapinithart
-      → plicinit → plicinithart → binit → iinit → fileinit → userinit
-                                                                  ^
-                              userinit() calls namei("/"), which needs a disk
+blkdev: 4000 sectors (1 MB), max request 16 sectors
+init: starting sh
+$
 ```
+
+The block driver is verified working: tracing every request shows the log
+recovery pass, `init` being read off disk, and `sh` being exec'd, all
+completing normally.
+
+## Known problem: console input
+
+Keystrokes reach the kernel (instrumenting `uartintr()` shows the right
+characters arriving) but far too slowly to use — on the order of one character
+per tens of seconds, so a command line never completes.
+
+The structure of the problem is understood; the fix is not finished:
+
+- HTIF allows only **one outstanding read** at a time, so at most one character
+  can be collected per poll.
+- Polling happens in `uartintr()`, which this port drives from the timer tick,
+  so **console input rate == tick rate**.
+- Each poll costs an HTIF round trip, and on this board HTIF rides the TSI
+  serial link, where every `tohost`/`fromhost` access is a slow target-memory
+  transaction issued by fesvr on the ARM side.
+
+Raising the tick rate is not a fix on its own: at ~25Hz the round trips stop
+fitting inside a tick and the kernel livelocks in interrupt context.
+
+The likely right answer is to stop driving console polling from the timer and
+instead poll from the scheduler's idle path, so input is limited by link
+latency rather than by the tick, without stealing time from running processes.
+
+## Measured hardware facts (not what the docs claim)
+
+- **CLINT `mtime` runs at 250kHz**, i.e. the 25MHz Rocket clock / 100 — not the
+  1MHz that rocket-chip's `DTSTimebase` advertises, and nothing like QEMU's
+  10MHz. Timer intervals have to be derived from 250kHz.
 
 Apply with:
 
@@ -25,6 +58,7 @@ cd xv6-riscv
 git checkout $(cat ../xv6/BASE_COMMIT)
 git apply ../xv6/0001-xv6-rocket-port.patch
 cp ../xv6/htif.c kernel/htif.c
+cp ../xv6/blkdev.c kernel/blkdev.c
 make kernel/kernel        # needs riscv64-unknown-elf-gcc
 ```
 
@@ -35,7 +69,7 @@ make kernel/kernel        # needs riscv64-unknown-elf-gcc
 
 ## What the port changes, and why
 
-xv6 targets QEMU's `virt` machine. Three of its assumptions do not hold on a
+xv6 targets QEMU's `virt` machine. Four of its assumptions do not hold on a
 2018-era Rocket core. The memory map, happily, needs no changes at all:
 
 | | Rocket (ZynqFPGAConfig) | xv6 / QEMU virt | |
@@ -47,7 +81,7 @@ xv6 targets QEMU's `virt` machine. Three of its assumptions do not hold on a
 | Console | HTIF | NS16550 @ `0x10000000` | **ported** |
 | Timer | CLINT only | Sstc (`stimecmp`) | **ported** |
 | PTE A/D | software | hardware (`menvcfg.ADUE`) | **ported** |
-| Disk | testchipip | virtio @ `0x10001000` | **not done** |
+| Disk | testchipip @ `0x10015000` | virtio @ `0x10001000` | **ported** |
 
 The bootrom hands off with `csrw mepc, DRAM_BASE; mret` and never touches
 `MPP`, so the core lands in M-mode at `0x80000000` — exactly what `entry.S`
@@ -109,16 +143,37 @@ single choke point for leaf PTEs. Setting `D` on a read-only page is harmless,
 since `D` is only consulted after `W` has passed. Non-leaf *table* PTEs are
 left alone: `table()` does not test `A`.
 
-### 4. Disk — not done
+### 4. Disk → testchipip block device (`kernel/blkdev.c`)
 
-`virtio_disk_init()` is commented out in `main.c`: nothing answers on the
-TileLink bus at `0x10001000`, so probing it faults. The real block device is
-testchipip's, reached through `fesvr-zynq`'s `+blkdev=<file>` option, and needs
-a driver written against the FIFO registers in
-[`../tools/pl-probe.c`](../tools/pl-probe.c)'s register map
-(`BLKDEV_REQ_FIFO_*`, `BLKDEV_DATA_FIFO_*`, `BLKDEV_RESP_FIFO_*`).
+Nothing answers on the TileLink bus at `0x10001000`, so probing virtio faults.
+The disk here is testchipip's block device, a DMA engine with a register file
+at `0x10015000` whose backing store is the file passed to `fesvr-zynq` as
+`+blkdev=<file>`. `blkdev.c` replaces `virtio_disk.c`.
 
-Until that exists, `userinit()`'s `namei("/")` blocks in `bread()` forever.
+Two things to know:
+
+- **Reading the `allocate` register at `+0x11` is what issues the request.**
+  Address/offset/length/direction must all be written first.
+- The DMA master hangs off the coherent system bus (`sbus.fromPort` in
+  `HasPeripheryBlockDevice`), so no cache maintenance is needed — a fence to
+  order the MMIO writes is enough.
+
+The MMIO page also has to be added to `kvmmake()`; without it the first
+register read takes a load page fault (`scause=0xd`, `stval=0x10015018`).
+
+### 5. Timer rearm must be absolute (`kernelvec.S`)
+
+Upstream's `timervec` does `mtimecmp += interval` — it rearms relative to the
+*old* compare value, which assumes the handler always finishes well inside one
+interval. That does not hold here: `blkdev_rw()` spins with interrupts disabled
+for the length of a disk transfer, so `mtime` can run past
+`mtimecmp + interval`. The next interrupt is then already due the moment the
+handler returns, and the core livelocks in the timer handler.
+
+This showed up as the shell accepting a command and then hanging forever, with
+the tick counter accelerating from 2.5/sec to ~33/sec the instant a command
+triggered disk I/O. `timervec` now rearms from the current `mtime`, so a late
+tick is dropped rather than compounding.
 
 ---
 

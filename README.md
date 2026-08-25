@@ -11,8 +11,8 @@ boot chain on current tools.
 
 **Status:** boots end to end to an interactive shell; the Rocket Chip core in
 the PL runs RISC-V programs driven from that shell; and the xv6 kernel
-initialises fully on Rocket, stopping only at the first disk access (no block
-driver yet — see [`xv6/`](xv6/)).
+boots on Rocket to a shell prompt off its own disk, though xv6's console input
+is not yet usable (see [`xv6/`](xv6/)).
 
 ```
 BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
@@ -280,6 +280,9 @@ is just an overlap. `0x08000000` keeps them apart.
 
 ## Next step
 
-A block-device driver for xv6, against testchipip's FIFOs (see
-[`xv6/README.md`](xv6/README.md)). The kernel already completes its whole init
-sequence and only stops at the first filesystem access.
+Make xv6's console input usable. Everything else is working: the kernel boots
+off the testchipip block device, runs `init`, execs `sh` and prints a prompt,
+and console output is fine. Input arrives but at roughly one character per tens
+of seconds, because it is polled one character per timer tick and each poll is
+a slow HTIF round trip over TSI. See
+[`xv6/README.md`](xv6/README.md#known-problem-console-input).

@@ -1,5 +1,5 @@
 diff --git a/Makefile b/Makefile
-index af1e7a5..44eb0ec 100644
+index af1e7a5..09e2a9b 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -6,7 +6,7 @@ OBJS = \
@@ -11,11 +11,57 @@ index af1e7a5..44eb0ec 100644
    $K/kalloc.o \
    $K/spinlock.o \
    $K/string.o \
+@@ -28,7 +28,7 @@ OBJS = \
+   $K/sysfile.o \
+   $K/kernelvec.o \
+   $K/plic.o \
+-  $K/virtio_disk.o
++  $K/blkdev.o
+ 
+ # riscv64-unknown-elf- or riscv64-linux-gnu-
+ # perhaps in /opt/riscv/bin
+diff --git a/kernel/bio.c b/kernel/bio.c
+index 9738804..6b7eaa8 100644
+--- a/kernel/bio.c
++++ b/kernel/bio.c
+@@ -95,7 +95,7 @@ bread(uint dev, uint blockno)
+ 
+   b = bget(dev, blockno);
+   if (!b->valid) {
+-    virtio_disk_rw(b, 0);
++    blkdev_rw(b, 0);
+     b->valid = 1;
+   }
+   return b;
+@@ -108,7 +108,7 @@ bwrite(struct buf *b)
+ {
+   if (!holdingsleep(&b->lock))
+     panic("bwrite");
+-  virtio_disk_rw(b, 1);
++  blkdev_rw(b, 1);
+ }
+ 
+ // Release a locked buffer.
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 0ae6896..a7d1d81 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -182,5 +182,10 @@ void            virtio_disk_init(void);
+ void            virtio_disk_rw(struct buf *, int);
+ void            virtio_disk_intr(void);
+ 
++// blkdev.c  (Rocket port: testchipip block device, replaces virtio_disk.c)
++void            blkdev_init(void);
++void            blkdev_rw(struct buf *, int);
++void            blkdev_intr(void);
++
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
 diff --git a/kernel/kernelvec.S b/kernel/kernelvec.S
-index 4d9ce02..5a7c7a3 100644
+index 4d9ce02..f08caac 100644
 --- a/kernel/kernelvec.S
 +++ b/kernel/kernelvec.S
-@@ -62,3 +62,42 @@ kernelvec:
+@@ -62,3 +62,54 @@ kernelvec:
  
          # return to whatever we were doing in the kernel.
          sret
@@ -39,11 +85,23 @@ index 4d9ce02..5a7c7a3 100644
 +        sd a2, 8(a0)
 +        sd a3, 16(a0)
 +
-+        # schedule the next timer interrupt
-+        # by adding interval to mtimecmp.
++        # Schedule the next timer interrupt.
++        #
++        # Rocket port: upstream does mtimecmp += interval, i.e. it rearms
++        # relative to the OLD compare value. That assumes the handler always
++        # runs well within one interval. Here it does not: blkdev_rw() spins
++        # with interrupts disabled for the length of a disk transfer, so mtime
++        # can run past mtimecmp+interval. The next interrupt is then already
++        # due the instant we return, and the core livelocks in the timer
++        # handler and never gets back to user space -- which showed up as the
++        # shell accepting a command and then hanging forever.
++        #
++        # Rearm from the CURRENT mtime instead, so a late tick is simply
++        # dropped rather than compounding.
 +        ld a1, 24(a0) # CLINT_MTIMECMP(hart)
 +        ld a2, 32(a0) # interval
-+        ld a3, 0(a1)
++        ld a3, 40(a0) # CLINT_MTIME
++        ld a3, 0(a3)  # a3 = current mtime
 +        add a3, a3, a2
 +        sd a3, 0(a1)
 +
@@ -59,28 +117,34 @@ index 4d9ce02..5a7c7a3 100644
 +
 +        mret
 diff --git a/kernel/main.c b/kernel/main.c
-index df58e32..2e84a2d 100644
+index df58e32..4237a50 100644
 --- a/kernel/main.c
 +++ b/kernel/main.c
-@@ -27,7 +27,12 @@ main()
+@@ -27,7 +27,11 @@ main()
      binit();            // buffer cache
      iinit();            // inode table
      fileinit();         // file table
 -    virtio_disk_init(); // emulated hard disk
 +    // Rocket port: there is no virtio device at VIRTIO0 (0x10001000) on this
-+    // SoC. The block device here is testchipip's, reached through fesvr, and
-+    // has no driver yet. Probing virtio would fault: nothing answers on the
-+    // TileLink bus at that address. Until a driver exists the kernel boots as
-+    // far as userinit(), and initcode's exec("/init") is what fails.
-+    // virtio_disk_init(); // emulated hard disk
++    // SoC -- probing it would fault, since nothing answers on the TileLink
++    // bus at that address. The disk is testchipip's block device at
++    // 0x10015000, backed by fesvr-zynq's +blkdev= file. See blkdev.c.
++    blkdev_init();      // testchipip block device
      userinit();         // first user process
  
      __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
 diff --git a/kernel/memlayout.h b/kernel/memlayout.h
-index 4f026ed..492e24c 100644
+index 4f026ed..c4337a7 100644
 --- a/kernel/memlayout.h
 +++ b/kernel/memlayout.h
-@@ -28,6 +28,11 @@
+@@ -25,9 +25,18 @@
+ #define VIRTIO0     0x10001000
+ #define VIRTIO0_IRQ 1
+ 
++// Rocket port: testchipip block device controller (testchipip
++// BlockDevice.scala, HasPeripheryBlockDevice). Used instead of virtio.
++#define BLKDEV0     0x10015000L
++
  // core-local interrupt controller (CLINT)
  #define CLINT_BASE  0x02000000L
  #define CLINT(hart) (CLINT_BASE + (hart) * 4)
@@ -161,7 +225,7 @@ index 3e982ab..2df7c91 100644
  // shift a physical address to the right place for a PTE.
  #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 diff --git a/kernel/start.c b/kernel/start.c
-index 62cce19..96b0294 100644
+index 62cce19..9a84c81 100644
 --- a/kernel/start.c
 +++ b/kernel/start.c
 @@ -10,6 +10,12 @@ void timerinit();
@@ -169,7 +233,7 @@ index 62cce19..96b0294 100644
  __attribute__((aligned(16))) char stack0[4096 * NCPU];
  
 +// Rocket port: a scratch area per CPU for machine-mode timer interrupts.
-+uint64 timer_scratch[NCPU][5];
++uint64 timer_scratch[NCPU][6];
 +
 +// assembly code in kernelvec.S for machine-mode timer interrupt.
 +extern void timervec();
@@ -200,7 +264,7 @@ index 62cce19..96b0294 100644
  
    // ask for clock interrupts.
    timerinit();
-@@ -51,16 +61,40 @@ start()
+@@ -51,16 +61,57 @@ start()
    asm volatile("mret");
  }
  
@@ -223,16 +287,33 @@ index 62cce19..96b0294 100644
 +  int id = r_mhartid();
 +
 +  // ask the CLINT for a timer interrupt.
-+  int interval = 1000000; // cycles
++  //
++  // Rocket port: upstream uses 1000000, which is ~0.1s against QEMU's 10MHz
++  // timebase. This SoC's CLINT runs at 1MHz (DTSTimebase in rocket-chip's
++  // system Configs.scala), so 1000000 would be one tick per SECOND. That is
++  // not just slow scheduling: uartintr() is driven off the tick here, and the
++  // HTIF console allows only one outstanding read, so it also caps console
++  // input at one keystroke per second.
++  //
++  // Measured: this SoC's CLINT mtime runs at 250kHz (the 25MHz Rocket clock
++  // divided by 100), NOT the 1MHz that rocket-chip's DTSTimebase advertises
++  // and not QEMU's 10MHz. 25000 cycles therefore gives ~10Hz.
++  //
++  // uartintr() is driven off this tick and each poll costs an HTIF round
++  // trip, so the tick rate also sets the console input rate.
++  int interval = 25000; // cycles -> ~10Hz at 250kHz
 +  *(uint64 *)CLINT_MTIMECMP(id) = *(uint64 *)CLINT_MTIME + interval;
 +
 +  // prepare information in scratch[] for timervec.
 +  // scratch[0..2] : space for timervec to save registers.
 +  // scratch[3] : address of CLINT MTIMECMP register.
 +  // scratch[4] : desired interval (in cycles) between timer interrupts.
++  // scratch[5] : address of CLINT MTIME (Rocket port: timervec rearms from
++  //              the current time, not from the old compare value).
 +  uint64 *scratch = &timer_scratch[id][0];
 +  scratch[3] = CLINT_MTIMECMP(id);
 +  scratch[4] = interval;
++  scratch[5] = CLINT_MTIME;
 +  w_mscratch((uint64)scratch);
 +
 +  // set the machine-mode trap handler.
@@ -249,7 +330,7 @@ index 62cce19..96b0294 100644
 +  w_mie(r_mie() | MIE_MTIE);
  }
 diff --git a/kernel/trap.c b/kernel/trap.c
-index 00e99bc..b254ccd 100644
+index 00e99bc..e09d7a5 100644
 --- a/kernel/trap.c
 +++ b/kernel/trap.c
 @@ -173,10 +173,14 @@ clockintr()
@@ -271,6 +352,15 @@ index 00e99bc..b254ccd 100644
  }
  
  // check if it's an external interrupt or software interrupt,
+@@ -198,7 +202,7 @@ devintr()
+     if (irq == UART0_IRQ) {
+       uartintr();
+     } else if (irq == VIRTIO0_IRQ) {
+-      virtio_disk_intr();
++      blkdev_intr();
+     } else if (irq) {
+       printk("unexpected interrupt irq=%d\n", irq);
+     }
 @@ -210,8 +214,18 @@ devintr()
        plic_complete(irq);
  
@@ -292,10 +382,22 @@ index 00e99bc..b254ccd 100644
      return 2;
    } else {
 diff --git a/kernel/vm.c b/kernel/vm.c
-index f50650b..041456b 100644
+index f50650b..e6d1f19 100644
 --- a/kernel/vm.c
 +++ b/kernel/vm.c
-@@ -165,7 +165,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+@@ -32,6 +32,11 @@ kvmmake(void)
+   // virtio mmio disk interface
+   kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+ 
++  // Rocket port: testchipip block device control registers. Without this the
++  // first register read in blkdev_init() takes a load page fault
++  // (scause=0xd, stval=0x10015018).
++  kvmmap(kpgtbl, BLKDEV0, BLKDEV0, PGSIZE, PTE_R | PTE_W);
++
+   // PLIC
+   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
+ 
+@@ -165,7 +170,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
        return -1;
      if (*pte & PTE_V)
        panic("mappages: remap");
