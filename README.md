@@ -9,10 +9,20 @@ targets Vivado 2016.2 and has no PYNQ-Z1 board port. This repo holds the board
 port plus the fixes needed to make an 8-year-old build system produce a working
 boot chain on current tools.
 
-**Status:** boots end to end to an interactive shell.
+**Status:** boots end to end to an interactive shell, and the Rocket Chip core
+in the PL runs RISC-V programs driven from that shell.
 
 ```
 BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
+                                                          └─ fesvr-zynq → Rocket (RV64)
+```
+
+```
+~ # cd /root && ./fesvr-zynq ./hello.riscv
+Hello from Rocket Chip on PYNQ-Z1!
+sum(1..100) = 5050 (expected 5050)
+64-bit shift OK (1<<40)
+PASS
 ```
 
 ---
@@ -111,6 +121,8 @@ fsbl/
   stack_init_override.c        bug #1 fix
   main.c                       FSBL main with an explicit UART0 CR write
 rootfs/etc/                    inittab + rcS (bug #4 fix)
+riscv-test/                    minimal RV64 HTIF test program for the Rocket core
+tools/pl-probe.c               dumps the Zynq adapter regs to check the PS->PL link
 patches/
   u-boot-xlnx/                 modern-toolchain fixes + board config
   linux-xlnx/                  modern-toolchain fixes
@@ -184,9 +196,61 @@ Boot mode jumper set to SD.
 
 ---
 
+## Talking to the Rocket core
+
+`fesvr-zynq` runs on the ARM side, loads an RV64 ELF into the Rocket core's
+DRAM over the TSI serial link, releases the core from reset, and then services
+its HTIF syscalls (so the RISC-V program's `write()` lands on the ARM console).
+
+Two things to know that are easy to get wrong:
+
+- **`fesvr-zynq` does not use UIO.** The devicetree carries a
+  `htif@43c00000` node with `compatible = "generic-uio"`, inherited from the
+  upstream boards, and on a modern kernel it fails to probe:
+
+  ```
+  uio_pdrv_genirq 43c00000.htif: failed to get IRQ
+  uio_pdrv_genirq: probe of 43c00000.htif failed with error -22
+  ```
+
+  This is a **red herring** — `zynq_driver_t` opens `/dev/mem` and mmaps
+  `0x43C00000` directly. The node is vestigial. (The probe failure is itself a
+  kernel bug of this vintage: `uio_pdrv_genirq` supports IRQ-less operation but
+  only when `platform_get_irq()` returns `-ENXIO`, while for DT devices it
+  returns `of_irq_get()`'s `-EINVAL`, so the IRQ-less path is unreachable.)
+
+- **`CONFIG_STRICT_DEVMEM` must be off**, or the `/dev/mem` mapping is refused.
+
+### Checking the link before blaming software
+
+[`tools/pl-probe.c`](tools/pl-probe.c) dumps the adapter's status registers.
+On a healthy build, before fesvr runs:
+
+```
+  +0x0c  TSI_IN_FIFO_COUNT          = 0x00000010   <- SerialFIFODepth = 16
+  +0x10  SYSTEM_RESET               = 0x00000001   <- core held in reset
+  +0x34  BLKDEV_RESP_FIFO_COUNT     = 0x00000010   <- BlockDeviceFIFODepth = 16
+```
+
+Those depths coming back as exactly the Chisel config values is what
+distinguishes a live design from a floating bus. All-`0xffffffff` means the PL
+is unconfigured, unclocked, or in reset.
+
+### Test program
+
+[`riscv-test/`](riscv-test/) is a self-contained RV64 bare-metal program — no
+riscv-tests or pk needed. It talks HTIF directly: syscalls by writing a request
+buffer address to `tohost` and waiting on `fromhost`, exit by writing
+`(code << 1) | 1`. It links at `0x80000000` (`ExtMem` base for this config).
+
+```bash
+cd riscv-test && make          # -> hello.riscv, needs riscv64-unknown-elf-gcc
+# copy hello.riscv to /root in the rootfs, then on the board:
+#   cd /root && ./fesvr-zynq ./hello.riscv
+```
+
 ## Next step
 
-`fesvr-zynq` and `libfesvr.so` are already in the rootfs at `/root/`. Talking to
-the Rocket Chip core over the HTIF/testchipip serial link is the next milestone,
-and the original motivation for this work — eventually booting xv6 on the RISC-V
-core while Linux runs on the ARM PS.
+xv6 on the Rocket core — the original motivation. The host-target channel is
+now proven, so the remaining work is on the RISC-V side (xv6-riscv expects an
+SBI/machine-mode environment, so `riscv-pk`/OpenSBI or equivalent comes first).
