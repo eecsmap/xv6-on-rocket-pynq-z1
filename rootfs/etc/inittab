@@ -1,0 +1,4 @@
+::sysinit:/etc/init.d/rcS
+ttyPS0::respawn:/bin/sh
+::restart:/sbin/init
+::ctrlaltdel:/sbin/reboot

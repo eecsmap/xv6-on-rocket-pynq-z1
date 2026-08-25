@@ -1,0 +1,13 @@
+diff --git a/arch/arm/cpu/armv7/config.mk b/arch/arm/cpu/armv7/config.mk
+index 6c82c3b537a..f63e6db66fb 100644
+--- a/arch/arm/cpu/armv7/config.mk
++++ b/arch/arm/cpu/armv7/config.mk
+@@ -7,7 +7,7 @@
+ 
+ # If armv7-a is not supported by GCC fall-back to armv5, which is
+ # supported by more tool-chains
+-PF_CPPFLAGS_ARMV7 := $(call cc-option, -march=armv7-a, -march=armv5)
++PF_CPPFLAGS_ARMV7 := $(call cc-option, -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard, -march=armv5t)
+ PLATFORM_CPPFLAGS += $(PF_CPPFLAGS_ARMV7)
+ 
+ # On supported platforms we set the bit which causes us to trap on unaligned

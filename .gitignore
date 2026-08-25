@@ -1,0 +1,42 @@
+# Vivado build output
+*.jou
+*.log
+*.str
+*.xsa
+*.bit
+*.dcp
+*.rpx
+*.rpt
+*.pb
+.Xil/
+usage_statistics_webtalk.*
+vivado*.backup.*
+*_rocketchip_*/
+ps7min/
+
+# Generated Verilog (comes out of rocket-chip's sbt build)
+board/src/verilog/Top.*.v
+board/src/verilog/AsyncResetReg.v
+board/src/verilog/plusarg_reader.v
+
+# Build intermediates
+# NB: no bare `*.d` here -- it also matches the rootfs/etc/init.d directory.
+*.o
+*.a
+*.elf
+*.su
+
+# Packaged boot images
+boot.bin
+uImage
+devicetree.dtb
+uramdisk.image.gz
+*.cpio.gz
+
+# busybox-built rootfs contents (only the config under rootfs/etc is tracked)
+rootfs/bin/
+rootfs/sbin/
+rootfs/lib/
+rootfs/usr/
+rootfs/root/
+rootfs/linuxrc

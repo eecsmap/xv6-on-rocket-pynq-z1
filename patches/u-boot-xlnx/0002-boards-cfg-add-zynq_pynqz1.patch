@@ -1,0 +1,12 @@
+diff --git a/boards.cfg b/boards.cfg
+index 7beb3c87bca..dcbfe333534 100644
+--- a/boards.cfg
++++ b/boards.cfg
+@@ -389,6 +389,7 @@ Active  arm         armv7          zynq        xilinx          zynq
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_zc770_XM012                     zynq_zc770:ZC770_XM012                                                                                                             Michal Simek <monstr@monstr.eu>:Jagannadha Sutradharudu Teki <jaganna@xilinx.com>
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_zc770_XM013                     zynq_zc770:ZC770_XM013                                                                                                             Michal Simek <monstr@monstr.eu>:Jagannadha Sutradharudu Teki <jaganna@xilinx.com>
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_zed                             -                                                                                                                                  Michal Simek <monstr@monstr.eu>:Jagannadha Sutradharudu Teki <jaganna@xilinx.com>
++Active  arm         armv7          zynq        xilinx          zynq                zynq_pynqz1                          -                                                                                                                                  EECS151 bring-up
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_afx_nor                         zynq_afx:AFX_NOR                                                                                                                   Michal Simek <michal.simek@xilinx.com>
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_afx_qspi                        zynq_afx:AFX_QSPI                                                                                                                  Michal Simek <michal.simek@xilinx.com>
+ Active  arm         armv7          zynq        xilinx          zynq                zynq_afx_nand                        zynq_afx:AFX_NAND                                                                                                                  Michal Simek <michal.simek@xilinx.com>

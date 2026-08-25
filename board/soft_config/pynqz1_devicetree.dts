@@ -1,0 +1,123 @@
+/*
+ *  Copyright (C) 2011 - 2014 Xilinx
+ *  Copyright (C) 2012 National Instruments Corp.
+ *
+ * This software is licensed under the terms of the GNU General Public
+ * License version 2, as published by the Free Software Foundation, and
+ * may be copied, distributed, and modified under those terms.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * Adapted from zedboard_devicetree.dts for PYNQ-Z1: this board's
+ * console UART is UART0 (MIO 14..15) not UART1 as on Zedboard (see
+ * pynq-z1_board_files/pynq-z1/1.0/preset.xml), and it has 512MB DDR3
+ * vs Zedboard's 256MB.
+ */
+/dts-v1/;
+/include/ "zynq-7000.dtsi"
+
+/ {
+	model = "PYNQ-Z1 Development Board";
+	compatible = "xlnx,zynq-pynqz1", "xlnx,zynq-7000";
+
+	aliases {
+		ethernet0 = &gem0;
+		serial0 = &uart0;
+		spi0 = &qspi;
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x20000000>;
+	};
+
+    htif_0: htif@43c00000 {
+                #address-cells = <1>;
+                #size-cells = <1>;
+                compatible = "generic-uio", "uio", "uio_pdrv";
+                reg = <0x43c00000 0x1000>;
+    };
+
+	chosen {
+		/* The busybox rootfs is a cpio (initramfs) whose entry point is
+		 * /sbin/init, not the /init that the kernel looks for by default.
+		 * Without rdinit= the kernel unpacks the initramfs, finds no
+		 * /init, silently falls back to mounting root= as a block device,
+		 * and panics with "Unable to mount root fs". */
+		bootargs = "console=ttyPS0,115200 rw earlyprintk rdinit=/sbin/init";
+		linux,stdout-path = "/amba/serial@e0000000";
+	};
+};
+
+&qspi {
+	status = "okay";
+	is-dual = <0>;
+	num-cs = <1>;
+	xlnx,fb-clk = <0x1>;
+	xlnx,qspi-mode = <0x0>;
+	flash@0 {
+		compatible = "n25q128";
+		reg = <0x0>;
+		spi-tx-bus-width = <1>;
+		spi-rx-bus-width = <4>;
+		spi-max-frequency = <50000000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		partition@qspi-fsbl-uboot {
+			label = "qspi-fsbl-uboot";
+			reg = <0x0 0x100000>;
+		};
+		partition@qspi-linux {
+			label = "qspi-linux";
+			reg = <0x100000 0x500000>;
+		};
+		partition@qspi-device-tree {
+			label = "qspi-device-tree";
+			reg = <0x600000 0x20000>;
+		};
+		partition@qspi-rootfs {
+			label = "qspi-rootfs";
+			reg = <0x620000 0x5E0000>;
+		};
+		partition@qspi-bitstream {
+			label = "qspi-bitstream";
+			reg = <0xC00000 0x400000>;
+		};
+	};
+};
+
+&usb0 {
+	status = "okay";
+	dr_mode = "host";
+	phy_type = "ulpi";
+};
+
+&gem0 {
+	status = "okay";
+	phy-mode = "rgmii-id";
+
+	phy0: phy@0 {
+		reg = <0>;
+	};
+};
+
+&sdhci0 {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+};
+
+/* PYNQ-Z1's PS reference oscillator is 50MHz (PCW_CRYSTAL_PERIPHERAL_FREQMHZ
+ * in the board preset). zynq-7000.dtsi hardcodes the 33.33MHz Zedboard/ZC702
+ * value, and the kernel derives every clock rate -- including the UART baud
+ * divisor -- from it in software, so leaving it silently garbles the console
+ * even though the PLLs are configured correctly by ps7_init(). Same root
+ * cause as CONFIG_ZYNQ_PS_CLK_FREQ on the u-boot side. */
+&clkc {
+	ps-clk-frequency = <50000000>;
+};

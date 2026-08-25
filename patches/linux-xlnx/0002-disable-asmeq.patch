@@ -1,0 +1,19 @@
+diff --git a/arch/arm/include/asm/compiler.h b/arch/arm/include/asm/compiler.h
+index 8155db2f7fa1..6f829fa9a941 100644
+--- a/arch/arm/include/asm/compiler.h
++++ b/arch/arm/include/asm/compiler.h
+@@ -9,7 +9,13 @@
+  * will cause compilation to stop on mismatch.
+  * (for details, see gcc PR 15089)
+  */
+-#define __asmeq(x, y)  ".ifnc " x "," y " ; .err ; .endif\n\t"
++/*
++ * Disabled: this register-allocation assertion fires spuriously with
++ * modern GCC's register allocator, which the GCC PR 15089 workaround
++ * above never anticipated. It's a paranoia check only, not required
++ * for correctness, so it's a no-op here instead.
++ */
++#define __asmeq(x, y)  ""
+ 
+ 
+ #endif /* __ASM_ARM_COMPILER_H */

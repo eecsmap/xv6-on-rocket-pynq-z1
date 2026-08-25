@@ -1,0 +1,10 @@
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+# CONFIG_DEVTMPFS_MOUNT only auto-mounts /dev when the kernel mounts a real
+# root filesystem -- it deliberately skips initramfs, which is what we boot.
+# Without this, /dev stays empty, so inittab's getty on ttyPS0 dies in a
+# respawn loop with "can't open /dev/ttyPS0: No such file or directory".
+mount -t devtmpfs devtmpfs /dev
+export LD_LIBRARY_PATH=/lib:/usr/local/lib
+echo "PYNQ-Z1 Rocket Chip bring-up rootfs" > /dev/console
