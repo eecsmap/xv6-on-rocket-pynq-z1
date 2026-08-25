@@ -9,8 +9,10 @@ targets Vivado 2016.2 and has no PYNQ-Z1 board port. This repo holds the board
 port plus the fixes needed to make an 8-year-old build system produce a working
 boot chain on current tools.
 
-**Status:** boots end to end to an interactive shell, and the Rocket Chip core
-in the PL runs RISC-V programs driven from that shell.
+**Status:** boots end to end to an interactive shell; the Rocket Chip core in
+the PL runs RISC-V programs driven from that shell; and the xv6 kernel
+initialises fully on Rocket, stopping only at the first disk access (no block
+driver yet — see [`xv6/`](xv6/)).
 
 ```
 BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
@@ -121,6 +123,8 @@ fsbl/
   stack_init_override.c        bug #1 fix
   main.c                       FSBL main with an explicit UART0 CR write
 rootfs/etc/                    inittab + rcS (bug #4 fix)
+board/uEnv.txt                 u-boot ramdisk placement (see memory split below)
+xv6/                           xv6-riscv port: HTIF console, CLINT timer, PTE A/D
 riscv-test/                    minimal RV64 HTIF test program for the Rocket core
 tools/pl-probe.c               dumps the Zynq adapter regs to check the PS->PL link
 patches/
@@ -249,8 +253,33 @@ cd riscv-test && make          # -> hello.riscv, needs riscv64-unknown-elf-gcc
 #   cd /root && ./fesvr-zynq ./hello.riscv
 ```
 
+## The ARM/Rocket memory split
+
+**This matters before running anything non-trivial on Rocket.**
+`rocketchip_wrapper.v` wires the Rocket memory port to AXI HP0 like this:
+
+```verilog
+assign S_AXI_araddr = {4'd1, mem_araddr[27:0]};
+assign S_AXI_awaddr = {4'd1, mem_awaddr[27:0]};
+```
+
+So Rocket's `0x80000000–0x8FFFFFFF` **is** Zynq DDR `0x10000000–0x1FFFFFFF` —
+the upper half of the PYNQ-Z1's 512MB. It is not separate memory. Three things
+have to agree about that:
+
+| Setting | Value | Why |
+|---|---|---|
+| devicetree `memory` | `reg = <0x0 0x10000000>` | Linux owns only the low 256MB. Give it all 512MB and any Rocket program scribbles over the running ARM kernel — xv6's `kinit()` alone memsets 128MB, which produced slab-allocator Oopses on the ARM side. zedboard does the same (512MB board, `0x10000000` here). |
+| `uEnv.txt` `bootm_size` | `0x08000000` | u-boot still sees 512MB and would otherwise place the ramdisk at the top, where Linux cannot reach it. |
+| `bootargs` | `cma=16M` | The kernel is built with `CONFIG_CMA_SIZE_MBYTES=128` — fine at 512MB, but half the RAM at 256MB, and the reservation lands on top of the ramdisk. |
+
+The last two interact: at `bootm_size=0x10000000` the ramdisk lands at
+`~0x0FBD3000` and collides with the `cma=16M` reservation at `0x0F000000`. The
+kernel then dies **before printing anything at all**, which looks alarming but
+is just an overlap. `0x08000000` keeps them apart.
+
 ## Next step
 
-xv6 on the Rocket core — the original motivation. The host-target channel is
-now proven, so the remaining work is on the RISC-V side (xv6-riscv expects an
-SBI/machine-mode environment, so `riscv-pk`/OpenSBI or equivalent comes first).
+A block-device driver for xv6, against testchipip's FIFOs (see
+[`xv6/README.md`](xv6/README.md)). The kernel already completes its whole init
+sequence and only stops at the first filesystem access.

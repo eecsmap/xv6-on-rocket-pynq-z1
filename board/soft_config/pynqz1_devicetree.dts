@@ -31,7 +31,16 @@
 
 	memory {
 		device_type = "memory";
-		reg = <0x0 0x20000000>;
+		/* PYNQ-Z1 has 512MB (0x20000000) of DDR, but Linux is only given
+		 * the low 256MB. The upper half is the Rocket core's DRAM,
+		 * reached through the AXI HP0 port -- it is NOT separate memory.
+		 *
+		 * Handing all 512MB to Linux lets a program running on Rocket
+		 * scribble over the ARM kernel: xv6's kinit() alone memsets every
+		 * page from `end` to PHYSTOP (128MB), which wiped Linux out from
+		 * under itself and produced slab-allocator Oopses on the ARM side.
+		 * zedboard does the same thing (512MB board, 0x10000000 here). */
+		reg = <0x0 0x10000000>;
 	};
 
     htif_0: htif@43c00000 {
@@ -47,7 +56,12 @@
 		 * Without rdinit= the kernel unpacks the initramfs, finds no
 		 * /init, silently falls back to mounting root= as a block device,
 		 * and panics with "Unable to mount root fs". */
-		bootargs = "console=ttyPS0,115200 rw earlyprintk rdinit=/sbin/init";
+		/* cma=16M: the kernel is configured with CONFIG_CMA_SIZE_MBYTES=128,
+		 * which was fine when Linux had all 512MB but is half of the RAM
+		 * now that the upper 256MB is reserved for Rocket. At 128MB the
+		 * reservation collides with where u-boot places the ramdisk and
+		 * the kernel dies before it can print anything at all. */
+		bootargs = "console=ttyPS0,115200 rw earlyprintk rdinit=/sbin/init cma=16M";
 		linux,stdout-path = "/amba/serial@e0000000";
 	};
 };

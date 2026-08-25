@@ -1,0 +1,13 @@
+# Keep u-boot's ramdisk/devicetree placement inside the low 128MB.
+#
+# u-boot still sees all 512MB, but Linux only owns the low 256MB -- the upper
+# half is Rocket's DRAM (rocketchip_wrapper.v maps Rocket 0x8xxxxxxx to Zynq
+# 0x1xxxxxxx). Left alone, u-boot puts the ramdisk at the top of what it
+# thinks is available, where Linux cannot reach it.
+#
+# 0x08000000 rather than 0x10000000: the kernel's CMA reservation (cma=16M)
+# sits at 0x0F000000-0x10000000, and a ramdisk placed at the top of a 256MB
+# window lands at ~0x0FBD3000, overlapping it. The kernel then dies before
+# producing any output at all.
+bootm_low=0x00000000
+bootm_size=0x08000000
