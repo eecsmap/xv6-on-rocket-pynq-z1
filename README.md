@@ -346,7 +346,13 @@ Power on with the boot mode jumper on SD; the whole chain comes up by itself.
 any keystroke stops it at `zynq-uboot>`. If that happens, type `boot`.
 
 The FTDI presents three ports; the console is the third (`/dev/ttyUSB2` here) at
-115200 8N1. Then, on the board:
+115200 8N1:
+
+```sh
+screen /dev/ttyUSB2 115200
+```
+
+(`Ctrl-A K` to quit screen.) Then, on the board:
 
 ```sh
 # a bare-metal RV64 program on Rocket
