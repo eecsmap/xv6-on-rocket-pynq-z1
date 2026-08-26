@@ -118,6 +118,7 @@ uartintr(void)
 {
   int c;
 
-  while ((c = htif_getc()) != -1)
+  while ((c = htif_getc()) != -1) {
     consoleintr(c);
+  }
 }

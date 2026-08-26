@@ -9,14 +9,14 @@ targets Vivado 2016.2 and has no PYNQ-Z1 board port. This repo holds the board
 port plus the fixes needed to make an 8-year-old build system produce a working
 boot chain on current tools.
 
-**Status:** boots end to end to an interactive shell; the Rocket Chip core in
-the PL runs RISC-V programs driven from that shell; and the xv6 kernel
-boots on Rocket to a shell prompt off its own disk, though xv6's console input
-is not yet usable (see [`xv6/`](xv6/)).
+**Status:** working end to end. Linux boots to an interactive shell; the Rocket
+Chip core in the PL runs RISC-V programs driven from that shell; and **xv6 runs
+on Rocket with an interactive shell of its own**, off its own disk — `ls`,
+`cat`, `echo`, `grep`, `wc` and friends all work (see [`xv6/`](xv6/)).
 
 ```
 BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
-                                                          └─ fesvr-zynq → Rocket (RV64)
+                                                          └─ fesvr-zynq → Rocket (RV64) → xv6 → $
 ```
 
 ```
@@ -104,6 +104,12 @@ Two small userspace issues, back to back:
   Fixed with `mount -t devtmpfs devtmpfs /dev` in
   [`rootfs/etc/init.d/rcS`](rootfs/etc/init.d/rcS).
 
+Two more of the same character turned up on the RISC-V side — a block-device DMA
+that silently drops the tail of any transfer to a destination that is not
+64-byte aligned, and a whole class of exceptions that rocket-chip refuses to
+delegate, which upstream xv6 then mistakes for timer interrupts and retries
+forever. Both are written up in [`xv6/README.md`](xv6/README.md).
+
 ---
 
 ## Layout
@@ -124,9 +130,11 @@ fsbl/
   main.c                       FSBL main with an explicit UART0 CR write
 rootfs/etc/                    inittab + rcS (bug #4 fix)
 board/uEnv.txt                 u-boot ramdisk placement (see memory split below)
-xv6/                           xv6-riscv port: HTIF console, CLINT timer, PTE A/D
+xv6/                           xv6-riscv port: HTIF console, CLINT timer, PTE A/D,
+                               testchipip disk, M-mode trap reflection
 riscv-test/                    minimal RV64 HTIF test program for the Rocket core
 tools/pl-probe.c               dumps the Zynq adapter regs to check the PS->PL link
+tools/send-kernel.py           push a rebuilt RV64 kernel to the board over serial
 patches/
   u-boot-xlnx/                 modern-toolchain fixes + board config
   linux-xlnx/                  modern-toolchain fixes
@@ -190,13 +198,19 @@ The BSP needs `XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ` defined (`108333333`, the
 
 ### SD card
 
-FAT32, four files at the root:
+FAT32, five files at the root:
 
 ```
-boot.bin  devicetree.dtb  uImage  uramdisk.image.gz
+boot.bin  devicetree.dtb  uImage  uramdisk.image.gz  uEnv.txt
 ```
 
 Boot mode jumper set to SD.
+
+Keep the partition small — 1GB is plenty. Some USB card readers cannot address
+past 4GB, and a FAT32 filesystem spanning a whole 32GB card will happily allocate
+above that line: the files then read back as the right size with garbage
+contents, silently, only when written through that reader. A 1GB partition keeps
+everything inside the region such a reader can verify.
 
 ---
 
@@ -278,11 +292,60 @@ The last two interact: at `bootm_size=0x10000000` the ramdisk lands at
 kernel then dies **before printing anything at all**, which looks alarming but
 is just an overlap. `0x08000000` keeps them apart.
 
+## Running it
+
+Power on with the boot mode jumper on SD; the whole chain comes up by itself.
+
+**Do not send anything to the serial port during u-boot's autoboot countdown** —
+any keystroke stops it at `zynq-uboot>`. If that happens, type `boot`.
+
+The FTDI presents three ports; the console is the third (`/dev/ttyUSB2` here) at
+115200 8N1. Then, on the board:
+
+```sh
+# a bare-metal RV64 program on Rocket
+cd /root && ./fesvr-zynq ./hello.riscv
+
+# xv6, with a disk
+cp /root/fs.img.orig /root/fs.img       # reset the disk to pristine
+cd /root && ./fesvr-zynq +blkdev=fs.img ./xv6-kernel
+```
+
+Ctrl-C leaves fesvr and returns to the ARM shell. xv6 reaches its `$` prompt in
+about 4 seconds.
+
+Resetting the disk between runs matters: xv6 writes to the image, and a crashed
+run leaves the log dirty, which shows up as `ireclaim: orphaned inode` or
+`panic: freeing free block` on the next boot.
+
+### The rootfs is in RAM
+
+`/root` lives in the initramfs, so **anything written there is gone on reboot**
+and the board reverts to whatever is in `uramdisk.image.gz` on the SD card.
+
+While iterating that is a feature — a reboot is a guaranteed clean slate, and it
+is the easiest way to restore a damaged `fs.img`. To make a change permanent,
+rebuild the ramdisk and rewrite the card.
+
+### Iterating on the RV64 kernel
+
+Because the rootfs is in RAM, a rebuilt kernel can go straight down the console
+rather than via the SD card:
+
+```sh
+make kernel/kernel                                    # in your xv6 tree
+/path/to/tools/send-kernel.py kernel/kernel
+```
+
+About 13 seconds to push, 4 to boot. See
+[`tools/send-kernel.py`](tools/send-kernel.py) for the several ways this can go
+wrong quietly (tty line-buffer limits, flow control, stripping).
+
+---
+
 ## Next step
 
-Make xv6's console input usable. Everything else is working: the kernel boots
-off the testchipip block device, runs `init`, execs `sh` and prints a prompt,
-and console output is fine. Input arrives but at roughly one character per tens
-of seconds, because it is polled one character per timer tick and each poll is
-a slow HTIF round trip over TSI. See
-[`xv6/README.md`](xv6/README.md#known-problem-console-input).
+`usertests` — the full xv6 test suite has not been run on this hardware yet, and
+it exercises far more of the kernel than an interactive shell does. Given that
+both bugs found so far were latent problems in the surrounding platform rather
+than in the port, it is the obvious place to look for the next one.

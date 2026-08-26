@@ -63,6 +63,8 @@
 #define W32(a, v) (*(volatile uint32 *)(a) = (v))
 #define W64(a, v) (*(volatile uint64 *)(a) = (v))
 
+static void blkdev_xfer(uint64 pa, uint32 offset, int write);
+
 static struct spinlock blkdev_lock;
 static uint32 blkdev_nsectors;
 
@@ -79,22 +81,13 @@ blkdev_init(void)
 
   if (blkdev_nsectors == 0)
     printk("blkdev: no backing store -- start fesvr-zynq with +blkdev=<file>\n");
+
 }
 
-// Read (write==0) or write (write==1) one BSIZE block, synchronously.
-void
-blkdev_rw(struct buf *b, int write)
+// Issue one transfer and wait for it to complete.
+static void
+blkdev_xfer(uint64 pa, uint32 offset, int write)
 {
-  // xv6 identity-maps the kernel, so a kernel virtual address is already the
-  // physical address the DMA engine needs.
-  uint64 pa = (uint64)b->data;
-  uint32 offset = b->blockno * SECTORS_PER_BLOCK;
-
-  if (blkdev_nsectors != 0 && offset + SECTORS_PER_BLOCK > blkdev_nsectors)
-    panic("blkdev_rw: out of range");
-
-  acquire(&blkdev_lock);
-
   // Wait for a free tracker.
   while (R8(BLKDEV_NALLOC) == 0)
     ;
@@ -117,6 +110,23 @@ blkdev_rw(struct buf *b, int write)
   (void)R8(BLKDEV_COMPLETE);
 
   __sync_synchronize();
+}
+
+// Read (write==0) or write (write==1) one BSIZE block, synchronously.
+void
+blkdev_rw(struct buf *b, int write)
+{
+  // xv6 identity-maps the kernel, so a kernel virtual address is already the
+  // physical address the DMA engine needs.
+  uint64 pa = (uint64)b->data;
+  uint32 offset = b->blockno * SECTORS_PER_BLOCK;
+
+  if (blkdev_nsectors != 0 && offset + SECTORS_PER_BLOCK > blkdev_nsectors)
+    panic("blkdev_rw: out of range");
+
+  acquire(&blkdev_lock);
+
+  blkdev_xfer(pa, offset, write);
 
   b->disk = 0;
 

@@ -42,6 +42,30 @@ index 9738804..6b7eaa8 100644
  }
  
  // Release a locked buffer.
+diff --git a/kernel/buf.h b/kernel/buf.h
+index 75a6003..e998c9a 100644
+--- a/kernel/buf.h
++++ b/kernel/buf.h
+@@ -7,5 +7,18 @@ struct buf {
+   uint refcnt;
+   struct buf *prev; // LRU cache list
+   struct buf *next;
+-  uchar data[BSIZE];
++  // Rocket port: data is a DMA target and MUST be 64-byte aligned.
++  // testchipip's block device moves each 64-byte chunk with a single
++  // edge.Put(lgSize = log2Ceil(cacheBlockBytes) = 6). TileLink requires a
++  // 2^6-byte Put to be 64-byte aligned, but the RTL just advances req.addr by
++  // 64 per burst and never checks, so with an unaligned destination the tail
++  // of the transfer is silently never written -- the bytes are left untouched.
++  //
++  // Upstream's struct buf is 1112 bytes, so without this every buffer in
++  // bcache sits at a different 64-byte phase and only *some* blocks come back
++  // damaged, with varying amounts of tail missing. That is what made this look
++  // like random file corruption. Aligning the field also rounds
++  // sizeof(struct buf) up to a multiple of 64, keeping every element of the
++  // bcache array aligned as well.
++  uchar data[BSIZE] __attribute__((aligned(64)));
+ };
 diff --git a/kernel/defs.h b/kernel/defs.h
 index 0ae6896..a7d1d81 100644
 --- a/kernel/defs.h
@@ -58,10 +82,10 @@ index 0ae6896..a7d1d81 100644
  // number of elements in fixed-size array
  #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
 diff --git a/kernel/kernelvec.S b/kernel/kernelvec.S
-index 4d9ce02..f08caac 100644
+index 4d9ce02..5fc99bb 100644
 --- a/kernel/kernelvec.S
 +++ b/kernel/kernelvec.S
-@@ -62,3 +62,54 @@ kernelvec:
+@@ -62,3 +62,124 @@ kernelvec:
  
          # return to whatever we were doing in the kernel.
          sret
@@ -74,16 +98,40 @@ index 4d9ce02..f08caac 100644
 +        #
 +.globl timervec
 +.align 4
++        # This is mtvec, so it catches EVERY machine-mode trap, not just the
++        # timer. That matters a great deal on this core.
++        #
++        # rocket-chip only lets a subset of exceptions be delegated: CSR.scala's
++        # delegable_exceptions is {misaligned_fetch, breakpoint, user_ecall,
++        # fetch_page_fault, load_page_fault, store_page_fault}, and a write to
++        # medeleg is masked with it (`reg_medeleg := wdata & delegable_exceptions`).
++        # So start.c's w_medeleg(0xffff) is silently stored as 0xB109, and
++        # illegal instruction (2), misaligned load/store (4/6) and the access
++        # faults (1/5/7) can NEVER reach S-mode. They always land here.
++        #
++        # Upstream's timervec assumes every machine trap is the timer. Doing
++        # that with an exception rearms the CLINT and mret's straight back to
++        # the faulting instruction, which faults again: the core livelocks
++        # producing no output whatsoever. So dispatch on mcause, and hand
++        # anything that is not the machine timer down to S-mode the way
++        # hardware delegation would have.
 +timervec:
 +        # start.c has set up the memory that mscratch points to:
 +        # scratch[0,8,16] : register save area.
 +        # scratch[24] : address of CLINT's MTIMECMP register.
 +        # scratch[32] : desired interval between interrupts.
-+        
++        # scratch[40] : address of CLINT's MTIME register.
++
 +        csrrw a0, mscratch, a0
 +        sd a1, 0(a0)
 +        sd a2, 8(a0)
 +        sd a3, 16(a0)
++
++        csrr a1, mcause
++        bgez a1, reflect                # MSB clear: an exception, never a timer
++        andi a2, a1, 0xff
++        li a3, 7                        # machine timer interrupt
++        bne a2, a3, reflect
 +
 +        # Schedule the next timer interrupt.
 +        #
@@ -116,6 +164,52 @@ index 4d9ce02..f08caac 100644
 +        csrrw a0, mscratch, a0
 +
 +        mret
++
++        # Reflect a non-timer machine trap into supervisor mode, mimicking what
++        # hardware delegation does: copy mcause/mepc/mtval into their S-mode
++        # counterparts, set sstatus.SPP from mstatus.MPP, move SIE into SPIE and
++        # clear SIE, then mret to stvec with MPP=S.
++        #
++        # satp and sscratch are left alone, exactly as a real S-mode trap would
++        # leave them, so entering through uservec (user trap) or kernelvec
++        # (kernel trap) works unchanged. The result is that xv6 reports the
++        # fault -- "usertrap(): unexpected scause 0x2" or a kerneltrap panic --
++        # instead of silently spinning forever.
++reflect:
++        csrw scause, a1                 # a1 still holds mcause
++        csrr a1, mepc
++        csrw sepc, a1
++        csrr a1, mtval
++        csrw stval, a1
++
++        csrr a1, mstatus
++        srli a2, a1, 11
++        andi a2, a2, 1                  # MPP low bit: 0 came from U, 1 from S
++        slli a2, a2, 8                  # -> SPP position
++        andi a3, a1, 2                  # old SIE (bit 1)
++        slli a3, a3, 4                  # -> SPIE position (bit 5)
++        andi a1, a1, -291               # clear SPP(8), SPIE(5), SIE(1) = ~0x122
++        or a1, a1, a2
++        or a1, a1, a3
++        li a2, 3
++        slli a2, a2, 11
++        not a2, a2
++        and a1, a1, a2                  # clear MPP
++        li a2, 1
++        slli a2, a2, 11
++        or a1, a1, a2                   # MPP = S, so mret lands in S-mode
++        csrw mstatus, a1
++
++        csrr a1, stvec
++        andi a1, a1, -4                 # direct mode: drop the mode bits
++        csrw mepc, a1
++
++        ld a3, 16(a0)
++        ld a2, 8(a0)
++        ld a1, 0(a0)
++        csrrw a0, mscratch, a0
++
++        mret
 diff --git a/kernel/main.c b/kernel/main.c
 index df58e32..4237a50 100644
 --- a/kernel/main.c
@@ -134,7 +228,7 @@ index df58e32..4237a50 100644
  
      __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
 diff --git a/kernel/memlayout.h b/kernel/memlayout.h
-index 4f026ed..c4337a7 100644
+index 4f026ed..dbca5d5 100644
 --- a/kernel/memlayout.h
 +++ b/kernel/memlayout.h
 @@ -25,9 +25,18 @@
@@ -156,6 +250,47 @@ index 4f026ed..c4337a7 100644
  
  // qemu puts platform-level interrupt controller (PLIC) here.
  #define PLIC                 0x0c000000L
+@@ -41,7 +50,13 @@
+ // for use by the kernel and user pages
+ // from physical address 0x80000000 to PHYSTOP.
+ #define KERNBASE 0x80000000L
+-#define PHYSTOP  (KERNBASE + 128 * 1024 * 1024)
++// Rocket port: 16MB, not upstream's 128MB. kinit() frees every page in this
++// range and kfree() memsets each one to catch dangling refs, so PHYSTOP sets
++// how much DRAM gets memset at boot. On this SoC that runs at 25MHz over the
++// FPGA's DRAM path and costs ~27 seconds for 128MB -- which was the entire
++// boot time, dwarfing everything else including all the disk I/O. 16MB is
++// ample: the filesystem image is 2MB and xv6's processes here are tiny.
++#define PHYSTOP  (KERNBASE + 16 * 1024 * 1024)
+ 
+ // map the trampoline page to the highest address,
+ // in both user and kernel space.
+diff --git a/kernel/proc.c b/kernel/proc.c
+index f4c1668..5a8f21e 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -463,8 +463,19 @@ scheduler(void)
+       release(&p->lock);
+     }
+     if (found == 0) {
+-      // nothing to run; stop running on this core until an interrupt.
+-      asm volatile("wfi");
++      // Rocket port: poll the HTIF console here instead of sleeping.
++      //
++      // HTIF has no interrupt line, so console input must be polled. Doing
++      // that only from the timer tick caps input at one character per tick,
++      // which is unusably slow on this board. Polling from the idle path
++      // bounds input by how fast fesvr answers instead, and costs almost
++      // nothing: while a read request is already outstanding, htif_getc()
++      // just reads the `fromhost` global out of local DRAM and generates no
++      // HTIF traffic at all.
++      //
++      // Deliberately no wfi() here -- waiting for an interrupt would put us
++      // straight back to one character per timer tick.
++      uartintr();
+     }
+   }
+ }
 diff --git a/kernel/riscv.h b/kernel/riscv.h
 index 3e982ab..2df7c91 100644
 --- a/kernel/riscv.h
@@ -382,10 +517,10 @@ index 00e99bc..e09d7a5 100644
      return 2;
    } else {
 diff --git a/kernel/vm.c b/kernel/vm.c
-index f50650b..e6d1f19 100644
+index f50650b..3f3a0be 100644
 --- a/kernel/vm.c
 +++ b/kernel/vm.c
-@@ -32,6 +32,11 @@ kvmmake(void)
+@@ -32,6 +32,16 @@ kvmmake(void)
    // virtio mmio disk interface
    kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
  
@@ -394,10 +529,15 @@ index f50650b..e6d1f19 100644
 +  // (scause=0xd, stval=0x10015018).
 +  kvmmap(kpgtbl, BLKDEV0, BLKDEV0, PGSIZE, PTE_R | PTE_W);
 +
++  // Rocket port: the CLINT. Upstream dropped this mapping when it moved to
++  // Sstc -- with stimecmp the supervisor never touches the CLINT at all. This
++  // core has no Sstc, so keep it reachable from supervisor mode.
++  kvmmap(kpgtbl, CLINT_BASE, CLINT_BASE, 0x10000, PTE_R | PTE_W);
++
    // PLIC
    kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
  
-@@ -165,7 +170,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+@@ -165,7 +175,8 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
        return -1;
      if (*pte & PTE_V)
        panic("mappages: remap");
