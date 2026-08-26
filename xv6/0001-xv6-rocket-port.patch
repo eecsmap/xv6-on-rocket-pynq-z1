@@ -533,6 +533,83 @@ index 62cce19..9a84c81 100644
 +  // enable machine-mode timer interrupts.
 +  w_mie(r_mie() | MIE_MTIE);
  }
+diff --git a/kernel/string.c b/kernel/string.c
+index adaa708..7ff9217 100644
+--- a/kernel/string.c
++++ b/kernel/string.c
+@@ -4,10 +4,33 @@ void *
+ memset(void *dst, int c, uint n)
+ {
+   char *cdst = (char *)dst;
+-  int i;
+-  for (i = 0; i < n; i++) {
+-    cdst[i] = c;
++  uint i = 0;
++
++  // Rocket port: upstream stores one byte per iteration, which on this
++  // 25MHz in-order core measures at ~5 cycles per byte -- so zeroing a 4KB
++  // page costs ~20k cycles. That is not a memory-bandwidth limit: it only
++  // moves 0.19 bytes/cycle, orders of magnitude below what the AXI HP port
++  // to the PS's DDR can carry. It is simply the loop.
++  //
++  // Store 8 bytes at a time instead. Note the alignment handling is not
++  // optional here: a misaligned load/store is one of the exceptions
++  // rocket-chip refuses to delegate (see kernelvec.S), so getting it wrong
++  // traps to M-mode rather than faulting cleanly.
++  if (n >= 16) {
++    while ((((uint64)cdst + i) & 7) != 0) {
++      cdst[i] = c;
++      i++;
++    }
++    uint64 word = (uint64)(unsigned char)c;
++    word |= word << 8;
++    word |= word << 16;
++    word |= word << 32;
++    for (; i + 8 <= n; i += 8)
++      *(uint64 *)(cdst + i) = word;
+   }
++  for (; i < n; i++)
++    cdst[i] = c;
++
+   return dst;
+ }
+ 
+@@ -39,13 +62,33 @@ memmove(void *dst, const void *src, uint n)
+   s = src;
+   d = dst;
+   if (s < d && s + n > d) {
++    // Overlapping and moving up: must copy backwards. Left as a byte loop;
++    // it is the rare case.
+     s += n;
+     d += n;
+     while (n-- > 0)
+       *--d = *--s;
+-  } else
+-    while (n-- > 0)
++    return dst;
++  }
++
++  // Rocket port: 8 bytes per iteration rather than one, for the same reason
++  // as memset() above. Only when source and destination share an alignment
++  // phase, since misaligned accesses trap to M-mode on this core. This is
++  // the hot path for uvmcopy() (a page per fork) and readi().
++  if (n >= 16 && ((((uint64)s) ^ ((uint64)d)) & 7) == 0) {
++    while ((((uint64)d) & 7) != 0 && n > 0) {
+       *d++ = *s++;
++      n--;
++    }
++    while (n >= 8) {
++      *(uint64 *)d = *(const uint64 *)s;
++      d += 8;
++      s += 8;
++      n -= 8;
++    }
++  }
++  while (n-- > 0)
++    *d++ = *s++;
+ 
+   return dst;
+ }
 diff --git a/kernel/trap.c b/kernel/trap.c
 index 00e99bc..e09d7a5 100644
 --- a/kernel/trap.c

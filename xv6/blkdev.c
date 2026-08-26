@@ -82,6 +82,21 @@ blkdev_init(void)
   if (blkdev_nsectors == 0)
     printk("blkdev: no backing store -- start fesvr-zynq with +blkdev=<file>\n");
 
+  // Drain completions left over from a previous run. The device lives in the
+  // PL and survives fesvr exiting, so killing fesvr part-way through a
+  // transfer leaves a completion queued. The next kernel to boot would then
+  // pop that stale tag as if it were its own first request and read the
+  // previous run's data -- which shows up as "panic: invalid file system" off
+  // a byte-for-byte pristine disk image, and clears only on a reboot.
+  int stale = 0;
+  while (R8(BLKDEV_NCOMPLETE) != 0) {
+    (void)R8(BLKDEV_COMPLETE);
+    stale++;
+  }
+  if (stale)
+    printk("blkdev: discarded %d stale completion(s) from a previous run\n",
+           stale);
+
 }
 
 // Issue one transfer and wait for it to complete.

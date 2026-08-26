@@ -4,7 +4,7 @@ Porting [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) to the Rocket core in
 the PL, driven by `fesvr-zynq` from ARM Linux on the PS.
 
 **Status:** working, and **the full upstream `usertests` suite passes on the
-hardware** — all 64 tests including the slow ones, in 46 minutes. The kernel
+hardware** — all 64 tests including the slow ones, in 25 minutes. The kernel
 boots, mounts the filesystem off the testchipip block device, runs `init`,
 execs `sh`, and gives an interactive shell.
 
@@ -30,7 +30,7 @@ xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
 Version 6 (v6). ...
 ```
 
-Boot to the prompt takes about **1.2 seconds**.
+Boot to the prompt takes about **0.67 seconds**.
 
 ```
 $ usertests
@@ -307,12 +307,24 @@ read takes a load page fault (`scause=0xd`, `stval=0x10015018`).
 
 ### Page allocation is DRAM-bound (`kalloc.c`)
 
-This SoC's memory path is slow: a 25MHz core writing through the FPGA fabric to
-the Zynq's DDR sustains **~4.7 MB/s** (measured — 128MB of `memset` took 27
-seconds). Anything that touches a lot of pages is bound by that, and nothing
-else comes close.
+Anything that touches a lot of pages dominates this port's runtime, and nothing
+else comes close — not the console, not the disk. Two separate causes, found by
+measuring rather than guessing.
 
-Upstream writes a 4KB page **three times** for one alloc/free round trip:
+**First, `memset()` and `memmove()` were the bottleneck, not the memory.**
+Upstream's are byte-at-a-time loops. Measured on this 25MHz in-order core they
+run at **5.03 cycles per byte** — which is exactly a `sb`/increment/compare/
+branch loop, not a memory limit: it only moves 0.19 bytes per cycle, orders of
+magnitude below what the AXI HP port to the PS's DDR can carry. Rewriting both
+to move 8 bytes per iteration takes it to **1.86 cycles/byte**.
+
+The alignment handling in those loops is not optional: a misaligned load or
+store is one of the exceptions rocket-chip refuses to delegate, so getting it
+wrong traps to M-mode instead of faulting cleanly.
+
+**Second, pages were being written three times.**
+
+One alloc/free round trip wrote a 4KB page three times over:
 
 | | |
 |---|---|
@@ -328,13 +340,17 @@ per run. At `PHYSTOP` = 128MB that is ~32000 pages, so ~768MB of `memset`:
 **162 seconds** by the numbers above. Measured, every `usertests` invocation
 took ~165s *regardless of which test was selected*:
 
-| | before | after |
-|---|---|---|
-| `usertests copyin` | 164.5s | **56.3s** |
-| `usertests forkforkfork` | 171.8s | **62.1s** |
-| `usertests kernmem` | 166.7s | **57.1s** |
-| full suite | 4317s | **2762s** |
-| boot to shell | 1.16s | **0.99s** |
+| | upstream | one memset less | + word-at-a-time | + 40 MHz |
+|---|---|---|---|---|
+| `usertests copyin` | 164.5s | 56.3s | 35.5s | **23.0s** |
+| `usertests forkforkfork` | 171.8s | 62.1s | 40.0s | **26.0s** |
+| `usertests kernmem` | 166.7s | 57.1s | 35.5s | **23.0s** |
+| full suite | 4317s | 2762s | — | **1482s** |
+| boot to shell | 1.16s | 0.99s | 0.97s | **0.67s** |
+
+**7.2× on a single test, 2.9× on the full suite**, with all 64 tests still
+passing. The last column is the clock, covered in
+[Raising the Rocket clock](#raising-the-rocket-clock) below.
 
 **`kalloc()`'s poison is removed outright**, and this is not a debug-for-speed
 trade: it cannot catch anything in this kernel. Every caller overwrites the
@@ -354,6 +370,40 @@ It is also always skipped while `kinit()` builds the initial free list, since
 those pages have never been allocated and so cannot be dangling references.
 That alone is what makes `PHYSTOP` = 128MB affordable: poisoning 128MB at boot
 cost 27 seconds, which used to be the entire boot time.
+
+### Raising the Rocket clock
+
+Upstream fpga-zynq runs this core at **25 MHz** (`RC_CLK_DIVIDE 40.0` in
+`board/src/verilog/clocking.vh`), and leaves a lot on the table: with that
+loose a constraint the routed design reported **WNS = +16.1 ns on a 40 ns
+period**, i.e. a critical path of only 23.9 ns.
+
+Tightening the constraint also makes Vivado work harder — at a 25 ns target
+the same design routes to a 21.6 ns critical path. **40 MHz closes with
+WNS = +3.395 ns** and passes the full suite.
+
+The reason this helps as much as it does is worth knowing. It would be
+reasonable to expect little gain, since page-zeroing stalls on memory and DRAM
+latency is fixed wall-clock time — a faster core would just spend more cycles
+waiting. But `rocketchip_wrapper.v` drives the block design's `ext_clk_in`
+from the MMCM output, so **the AXI interconnect and the PS's `S_AXI_HP0` port
+run at the Rocket clock too**. Raising it speeds up the memory path in step
+with the core.
+
+The measurement confirms it: **cycles per byte barely moves** (1.860 → 1.888
+for a 16MB `memset`), so the work per byte is unchanged and the whole gain is
+each cycle being shorter. Wall-clock for that `memset` goes 1.249 s → 0.792 s,
+and the suite tracks the clock ratio almost exactly (1.54× measured for a 1.6×
+clock).
+
+**50 MHz** also closes timing, but at **WNS = +0.249 ns**. It booted and passed
+three individual tests; a full-suite run was not completed, so it is unverified
+and not shipped. A quarter of a nanosecond is inside the noise of on-chip
+variation and temperature.
+
+Testing a new bitstream does not need the SD card: the board has `/dev/xdevcfg`,
+so `cat bitstream.bin > /dev/xdevcfg` reprograms the PL in about 0.1 s. Produce
+the `.bin` with `bootgen -image x.bif -arch zynq -process_bitstream bin`.
 
 ---
 

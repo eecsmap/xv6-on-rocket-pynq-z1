@@ -207,6 +207,7 @@ images are **not** tracked — see `.gitignore`.
 | DDR | 256 MB | **512 MB** |
 | PS ref clock | 33.333 MHz | **50 MHz** |
 | PL clock in | 100 MHz | **125 MHz** (pin H16) |
+| Rocket clock | 25 MHz | **40 MHz** (see `clocking.vh`) |
 
 ---
 
@@ -412,8 +413,9 @@ directions from here:
   bitstream flow and fesvr plumbing underneath are all already working.
 - **A larger Rocket config** — more cores, an FPU, or a bigger cache — to see
   what still fits in the xc7z020's fabric.
-- **Speed.** The core runs at 25MHz and its DRAM path through the FPGA fabric
-  sustains only ~4.7 MB/s, which is what actually bounds `usertests` — see
-  [`xv6/README.md`](xv6/README.md#page-allocation-is-dram-bound). Raising the
-  Rocket clock or improving the memory path would help far more than anything
-  on the console side.
+- **More clock.** 40 MHz ships and closes with 3.4 ns to spare; 50 MHz closes
+  at 0.25 ns but is unverified. Getting past ~46 MHz means attacking the
+  critical path itself, which runs from the Zynq adapter's address register
+  into the TileLink broadcast hub.
+- **A bigger Rocket config** — more cores, an FPU, a larger cache — to see what
+  still fits in the xc7z020 and how the memory path responds.
