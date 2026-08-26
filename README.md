@@ -211,6 +211,62 @@ images are **not** tracked — see `.gitignore`.
 
 ---
 
+## What it costs on the chip
+
+Post-place utilisation of the 40 MHz build on the xc7z020-clg400:
+
+| Resource | Used | Available | % |
+|---|---|---|---|
+| Slice LUTs | 30,761 | 53,200 | 57.8 |
+| — as logic | 29,730 | 53,200 | 55.9 |
+| — as distributed RAM | 1,030 | 17,400 | 5.9 |
+| Slice registers | 16,497 | 106,400 | 15.5 |
+| **Slices occupied** | **9,723** | **13,300** | **73.1** |
+| Block RAM tiles | 24 | 140 | 17.1 |
+| DSP48E1 | 15 | 220 | 6.8 |
+| MMCM | 1 | 4 | 25.0 |
+
+**The real constraint is slice occupancy at 73%, not the 58% LUT figure.** The
+gap between them is congestion: many slices are claimed with only some of their
+LUTs used. "42% of LUTs free" is not 42% of headroom. It also shows up in the
+critical path, where **58% of the delay is routing**:
+
+```
+Slack (MET):      3.395ns          period = 25.000ns
+Source:           top/target/adapter/addr_reg[4]/C
+Destination:      top/target/bh/TLBroadcastTracker_3/o_data/ram_mask_reg_.../RAMA_D1/I
+Data Path Delay:  21.222ns   (logic 8.838ns 41.6% / route 12.384ns 58.4%)
+Logic Levels:     36  (CARRY4=19  LUT2=2 LUT3=3 LUT4=4 LUT5=1 LUT6=7)
+```
+
+19 CARRY4s is a ~76-bit carry chain — the Zynq adapter's address decode feeding
+the broadcast hub's mask RAM. 21.222 ns puts the ceiling at about **47 MHz**
+without touching RTL; going higher means pipelining that path.
+
+### Why a bigger cache is not the next move
+
+BRAM sits at 17%, which invites the idea of enlarging the caches. It would not
+help. The config is `nSets=64, nWays=4, blockBytes=64` — 16KB each for L1I and
+L1D — and the workload that dominates runtime is page zeroing and page copying:
+**pure streaming with no reuse.** Each 4KB page is touched once and never read
+again, so every line misses exactly once no matter how large the cache is. The
+number of fills and writebacks does not change.
+
+What does look promising is that `WithNBigCores` explicitly overrides
+`DCacheParams`'s default of 1 with **`nMSHRs = 0`**, making the D-cache
+*blocking*: every miss stalls the pipeline until DRAM answers, with no overlap.
+That is the measured ~125 cycles per 64-byte line. Streaming writes to
+consecutive lines are exactly the pattern that should overlap.
+
+Two caveats before anyone tries it. MSHRs cost LUTs and FFs — the SDQ, the RPQ
+and their state machines — not BRAM, and at 73% slice occupancy the design may
+not fit, or may fit and lose the 40 MHz. And the upside is bounded: `memset` is
+roughly half of the per-page cost, so even perfect overlap caps out near 2×.
+Changing it also means regenerating `Top.ZynqFPGAConfig.v` through the Chisel
+build, so it is not a one-line experiment.
+
+---
+
 ## Building
 
 Prerequisites: Vivado 2024.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
@@ -413,9 +469,10 @@ directions from here:
   bitstream flow and fesvr plumbing underneath are all already working.
 - **A larger Rocket config** — more cores, an FPU, or a bigger cache — to see
   what still fits in the xc7z020's fabric.
-- **More clock.** 40 MHz ships and closes with 3.4 ns to spare; 50 MHz closes
-  at 0.25 ns but is unverified. Getting past ~46 MHz means attacking the
-  critical path itself, which runs from the Zynq adapter's address register
-  into the TileLink broadcast hub.
-- **A bigger Rocket config** — more cores, an FPU, a larger cache — to see what
-  still fits in the xc7z020 and how the memory path responds.
+- **A non-blocking D-cache** (`nMSHRs > 0`) — the best-identified lever, with
+  the caveats in [What it costs on the chip](#what-it-costs-on-the-chip).
+- **More clock.** 40 MHz ships with 3.4 ns to spare; 50 MHz closes at 0.25 ns
+  but is unverified. Past ~47 MHz means pipelining the critical path.
+- **Boot Linux on Rocket** — needs a bigger Rocket config than
+  `ZynqFPGAConfig` and a RISC-V Linux build, but everything underneath it
+  already works.
