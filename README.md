@@ -21,6 +21,11 @@ BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
                                                           └─ fesvr-zynq → Rocket (RV64) → xv6 → $
 ```
 
+![xv6 booting on the Rocket core and listing its filesystem](docs/img/xv6-shell.png)
+
+*On real hardware: `fesvr-zynq` launched from the ARM shell, xv6 booting on the
+Rocket core in the PL, and `ls` listing its own filesystem.*
+
 ```
 ~ # cd /root && ./fesvr-zynq ./hello.riscv
 Hello from Rocket Chip on PYNQ-Z1!
