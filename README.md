@@ -460,19 +460,17 @@ wrong quietly (tty line-buffer limits, flow control, stripping).
 
 ## Next step
 
-xv6 passes `usertests` in full, so the port itself is in good shape. The obvious
-directions from here:
+xv6 passes `usertests` in full, so the port itself is in good shape. Ranked by
+what the measurements actually point at:
 
-- **Boot Linux on Rocket**, which is what upstream `fpga-zynq` was originally for
-  and what this repo's old name wrongly implied. That needs a bigger Rocket
-  config than `ZynqFPGAConfig` and a RISC-V Linux build, but the board port,
-  bitstream flow and fesvr plumbing underneath are all already working.
-- **A larger Rocket config** — more cores, an FPU, or a bigger cache — to see
-  what still fits in the xc7z020's fabric.
 - **A non-blocking D-cache** (`nMSHRs > 0`) — the best-identified lever, with
   the caveats in [What it costs on the chip](#what-it-costs-on-the-chip).
+  Note this is *not* "more cache": see why in that section.
 - **More clock.** 40 MHz ships with 3.4 ns to spare; 50 MHz closes at 0.25 ns
-  but is unverified. Past ~47 MHz means pipelining the critical path.
-- **Boot Linux on Rocket** — needs a bigger Rocket config than
-  `ZynqFPGAConfig` and a RISC-V Linux build, but everything underneath it
-  already works.
+  but is unverified. Past ~47 MHz means pipelining the critical path from the
+  Zynq adapter's address decode into the TileLink broadcast hub.
+- **Boot Linux on Rocket** — what upstream `fpga-zynq` was originally for, and
+  what this repo's old name wrongly implied. Needs a bigger Rocket config than
+  `ZynqFPGAConfig` and a RISC-V Linux build, but the board port, bitstream flow
+  and fesvr plumbing underneath already work. Fitting a bigger config is the
+  open question at 73% slice occupancy.
