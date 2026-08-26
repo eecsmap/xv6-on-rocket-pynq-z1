@@ -4,9 +4,9 @@ Porting [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) to the Rocket core in
 the PL, driven by `fesvr-zynq` from ARM Linux on the PS.
 
 **Status:** working, and **the full upstream `usertests` suite passes on the
-hardware** — all 64 tests including the slow ones. The kernel boots, mounts the
-filesystem off the testchipip block device, runs `init`, execs `sh`, and gives
-an interactive shell.
+hardware** — all 64 tests including the slow ones, in 46 minutes. The kernel
+boots, mounts the filesystem off the testchipip block device, runs `init`,
+execs `sh`, and gives an interactive shell.
 
 ```
 ~ # cd /root && ./fesvr-zynq +blkdev=fs.img ./xv6-kernel
@@ -53,11 +53,15 @@ OK
 ALL TESTS PASSED
 ```
 
-The suite takes a little over an hour, almost all of it console I/O rather than
-compute: `kernmem` alone deliberately faults 113 times and each report is a
-couple of lines, at roughly a millisecond per character over HTIF. `balloc: out
-of blocks` and `ialloc: no inodes` are `diskfull` and `outofinodes` doing their
-job, not errors.
+`balloc: out of blocks` and `ialloc: no inodes` are `diskfull` and `outofinodes`
+doing their job, not errors. So are the ~113 `usertrap(): unexpected scause`
+reports: that is `kernmem` forking children which deliberately dereference
+`KERNBASE` to prove user mode cannot reach it.
+
+What actually costs time is measured in
+[page allocation is DRAM-bound](#page-allocation-is-dram-bound) below — it is
+not the console. The console moves 2950 B/s and the whole suite only emits
+14KB, i.e. under 5 seconds of the total.
 
 Apply with:
 
@@ -301,31 +305,55 @@ Three things to know:
 The MMIO page also has to be added to `kvmmake()`; without it the first register
 read takes a load page fault (`scause=0xd`, `stval=0x10015018`).
 
-### Boot time: skip the free-list poison, not the memory (`kalloc.c`)
+### Page allocation is DRAM-bound (`kalloc.c`)
 
-`kinit()` frees every page from `end` to `PHYSTOP`, and `kfree()` memsets each
-one to `1` to catch dangling references. On this SoC that is a 25MHz core writing
-across the FPGA's DRAM path, and 128MB of it took **27 seconds** — which was the
-*entire* boot time, dwarfing everything else including all the disk I/O.
+This SoC's memory path is slow: a 25MHz core writing through the FPGA fabric to
+the Zynq's DDR sustains **~4.7 MB/s** (measured — 128MB of `memset` took 27
+seconds). Anything that touches a lot of pages is bound by that, and nothing
+else comes close.
 
-The obvious fix is to shrink `PHYSTOP`, and at 16MB boot drops to 3.6s. But
-`usertests`' `sbrkmuch` eagerly grows a process to 100MB, so that trades the test
-suite for the boot time.
+Upstream writes a 4KB page **three times** for one alloc/free round trip:
 
-Neither is necessary. `kalloc()` already poisons every page it hands out (with
-`5`), and pages on the *initial* free list have never been allocated, so there is
-no dangling reference for the boot-time memset to catch. It is pure cost. So
-`kfree()` skips the poison only while `kinit()` is building the list:
+| | |
+|---|---|
+| `kalloc()` | `memset(r, 5, PGSIZE)` — poison, to catch uninitialised reads |
+| `uvmalloc()` etc. | `memset(mem, 0, PGSIZE)` — **required**, or freed data leaks between processes |
+| `kfree()` | `memset(pa, 1, PGSIZE)` — poison, to catch dangling references |
+
+12KB of DRAM traffic per 4KB page. That is invisible on QEMU and dominant here.
+
+It shows up most starkly in `usertests`, whose `countfree()` walks the entire
+free list one `sbrk(PGSIZE)` at a time — and `drivetests()` calls it **twice**
+per run. At `PHYSTOP` = 128MB that is ~32000 pages, so ~768MB of `memset`:
+**162 seconds** by the numbers above. Measured, every `usertests` invocation
+took ~165s *regardless of which test was selected*:
+
+| | before | after |
+|---|---|---|
+| `usertests copyin` | 164.5s | **56.3s** |
+| `usertests forkforkfork` | 171.8s | **62.1s** |
+| `usertests kernmem` | 166.7s | **57.1s** |
+| full suite | 4317s | **2762s** |
+| boot to shell | 1.16s | **0.99s** |
+
+**`kalloc()`'s poison is removed outright**, and this is not a debug-for-speed
+trade: it cannot catch anything in this kernel. Every caller overwrites the
+whole page before reading it — `walk()`, `uvmcreate()`, `uvmalloc()` and
+`vmfault()` all `memset(0)` immediately, and `uvmcopy()` `memmove()`s over it.
+The poison is destroyed before it can ever be observed, so it was pure DRAM
+traffic.
+
+**`kfree()`'s poison does have real value**, so it stays, behind a switch that
+defaults off on this port:
 
 ```c
-if (!kinit_freeing)
-    memset(pa, 1, PGSIZE);
+#define KFREE_POISON 0   // set to 1 when chasing a memory bug
 ```
 
-Real runtime frees are still poisoned, so the use-after-free detection that
-actually matters is untouched. Building the free list is then ~32K linked-list
-stores instead of 128MB of DRAM writes. `PHYSTOP` stays at upstream's 128MB and
-boot takes **1.2 seconds** — faster than the 16MB build was.
+It is also always skipped while `kinit()` builds the initial free list, since
+those pages have never been allocated and so cannot be dangling references.
+That alone is what makes `PHYSTOP` = 128MB affordable: poisoning 128MB at boot
+cost 27 seconds, which used to be the entire boot time.
 
 ---
 
@@ -335,6 +363,9 @@ boot takes **1.2 seconds** — faster than the 16MB build was.
   1MHz that rocket-chip's `DTSTimebase` advertises, and nothing like QEMU's
   10MHz. Timer intervals have to be derived from 250kHz.
 - **`medeleg` is `0xB109`, whatever you write to it** (see above).
+- **DRAM writes sustain ~4.7 MB/s** from the core, and the HTIF console moves
+  ~2950 B/s. Those two numbers explain essentially all of this port's
+  performance behaviour.
 - **`mtval`/`stval` exist** under rocket's older `mbadaddr`/`sbadaddr` names —
   same CSR numbers (`0x343`/`0x143`), so the assembler's modern mnemonics work.
 

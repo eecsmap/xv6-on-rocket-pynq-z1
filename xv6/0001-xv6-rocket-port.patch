@@ -82,20 +82,36 @@ index 0ae6896..a7d1d81 100644
  // number of elements in fixed-size array
  #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
 diff --git a/kernel/kalloc.c b/kernel/kalloc.c
-index 2fcec38..bdc8251 100644
+index 2fcec38..82adef4 100644
 --- a/kernel/kalloc.c
 +++ b/kernel/kalloc.c
-@@ -18,6 +18,9 @@ struct run {
+@@ -18,6 +18,25 @@ struct run {
    struct run *next;
  };
  
 +// Rocket port: set while kinit() populates the free list; see kfree().
 +static int kinit_freeing;
 +
++// Rocket port: upstream poisons every page on free (with 1) and again on
++// allocation (with 5), to catch dangling and uninitialised references. On this
++// SoC each of those is a 4KB DRAM write from a 25MHz core across the FPGA
++// fabric, and the measured write throughput is ~4.7 MB/s. Between them and
++// uvmalloc()'s mandatory zeroing, one alloc+free round trip writes 12KB for a
++// 4KB page.
++//
++// That is not academic: usertests' countfree() walks the entire free list one
++// sbrk() at a time, twice per run, which at PHYSTOP=128MB is ~32000 pages and
++// therefore ~768MB of memset -- 162 seconds by the numbers above, and 164.5s
++// measured. It dominated every usertests invocation regardless of which test
++// was selected.
++//
++// Set to 1 to restore upstream's behaviour when chasing a memory bug.
++#define KFREE_POISON 0
++
  struct {
    struct spinlock lock;
    struct run *freelist;
-@@ -27,7 +30,9 @@ void
+@@ -27,7 +46,9 @@ void
  kinit()
  {
    initlock(&kmem.lock, "kmem");
@@ -105,23 +121,35 @@ index 2fcec38..bdc8251 100644
  }
  
  void
-@@ -52,7 +57,15 @@ kfree(void *pa)
+@@ -51,8 +72,11 @@ kfree(void *pa)
+   if (((uint64)pa % PGSIZE) != 0 || (char *)pa < end || (uint64)pa >= PHYSTOP)
      panic("kfree");
  
-   // Fill with junk to catch dangling refs.
+-  // Fill with junk to catch dangling refs.
 -  memset(pa, 1, PGSIZE);
-+  //
-+  // Rocket port: skipped while kinit() is building the initial free list.
-+  // Those pages have never been allocated, so there is no dangling reference
-+  // to catch, and kalloc() poisons every page it hands out anyway. The memset
-+  // is not free here: it is a 25MHz core writing PHYSTOP-worth of DRAM across
-+  // the FPGA fabric, which cost 27 seconds for 128MB -- the entire boot time,
-+  // dwarfing even the disk I/O. Real runtime frees are still poisoned.
-+  if (!kinit_freeing)
++  // Fill with junk to catch dangling refs. See KFREE_POISON above; also
++  // always skipped while kinit() builds the initial free list, since those
++  // pages have never been allocated and so cannot be dangling references.
++  if (KFREE_POISON && !kinit_freeing)
 +    memset(pa, 1, PGSIZE);
  
    r = (struct run *)pa;
  
+@@ -76,7 +100,12 @@ kalloc(void)
+     kmem.freelist = r->next;
+   release(&kmem.lock);
+ 
+-  if (r)
+-    memset((char *)r, 5, PGSIZE); // fill with junk
++  // Rocket port: upstream does memset((char *)r, 5, PGSIZE) here to catch
++  // reads of uninitialised memory. It is dropped because it cannot actually
++  // catch anything: every caller in this kernel overwrites the whole page
++  // before reading it -- walk(), uvmcreate(), uvmalloc() and vmfault() all
++  // memset(0) immediately, and uvmcopy() memmove()s over it. The poison is
++  // destroyed before it can be observed, so it is pure DRAM traffic. See
++  // KFREE_POISON above for the cost.
+   return (void *)r;
+ }
 diff --git a/kernel/kernelvec.S b/kernel/kernelvec.S
 index 4d9ce02..5fc99bb 100644
 --- a/kernel/kernelvec.S

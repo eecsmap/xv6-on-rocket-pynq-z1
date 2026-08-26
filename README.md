@@ -412,6 +412,8 @@ directions from here:
   bitstream flow and fesvr plumbing underneath are all already working.
 - **A larger Rocket config** — more cores, an FPU, or a bigger cache — to see
   what still fits in the xc7z020's fabric.
-- **Speed.** The core runs at 25MHz and every console character is an HTIF round
-  trip over TSI, which is why `usertests` takes an hour. Buffering console
-  writes, or giving the design a real UART, would cut that dramatically.
+- **Speed.** The core runs at 25MHz and its DRAM path through the FPGA fabric
+  sustains only ~4.7 MB/s, which is what actually bounds `usertests` — see
+  [`xv6/README.md`](xv6/README.md#page-allocation-is-dram-bound). Raising the
+  Rocket clock or improving the memory path would help far more than anything
+  on the console side.
