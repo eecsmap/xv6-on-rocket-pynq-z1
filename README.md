@@ -1,13 +1,15 @@
-# PYNQ-Z1 Rocket Chip + Linux bring-up
+# MIT xv6 on a UCB Rocket Chip, on a PYNQ-Z1
 
-Booting Linux on a Digilent/TUL **PYNQ-Z1** (Zynq-7020, `xc7z020clg400-1`) with a
-Rocket Chip bitstream in the PL, built on **Vivado 2024.1** and a modern
+Running **MIT's [xv6-riscv](https://github.com/mit-pdos/xv6-riscv)** on a
+**UC Berkeley [Rocket Chip](https://github.com/chipsalliance/rocket-chip)**
+RV64GC core synthesized into the FPGA fabric of a Digilent/TUL **PYNQ-Z1**
+(Zynq-7020, `xc7z020clg400-1`) — built with **Vivado 2024.1** and a modern
 GCC 13 host toolchain.
 
 The upstream starting point, [`ucb-bar/fpga-zynq`](https://github.com/ucb-bar/fpga-zynq),
-targets Vivado 2016.2 and has no PYNQ-Z1 board port. This repo holds the board
-port plus the fixes needed to make an 8-year-old build system produce a working
-boot chain on current tools.
+is deprecated, targets Vivado 2016.2, and has no PYNQ-Z1 board port. This repo
+holds the board port, the fixes needed to make an 8-year-old build system produce
+a working boot chain on current tools, and the xv6 port itself.
 
 **Status:** working end to end. Linux boots to an interactive shell; the Rocket
 Chip core in the PL runs RISC-V programs driven from that shell; and **xv6 runs
@@ -26,6 +28,50 @@ sum(1..100) = 5050 (expected 5050)
 64-bit shift OK (1<<40)
 PASS
 ```
+
+---
+
+## How it fits together
+
+The Zynq-7020 is two processors in one package, and this project uses both.
+
+```
+┌─ PS: hard silicon ───────────────┐   ┌─ PL: FPGA fabric ──────────┐
+│  ARM Cortex-A9 dual-core         │   │  Rocket Chip RV64GC        │
+│  Linux 3.15 + busybox            │   │  ZynqFPGAConfig, 25 MHz    │
+│                                  │   │                            │
+│  fesvr-zynq  ──── TSI / HTIF ────┼───┼──►  xv6                    │
+└──────────────────────────────────┘   └────────────────────────────┘
+         AXI HP0 ──► shared DDR ◄── Rocket 0x8xxxxxxx = Zynq 0x1xxxxxxx
+```
+
+**xv6 does not own the board.** It runs on the soft RISC-V core in the fabric,
+while the hard ARM core beside it runs Linux and acts as xv6's front-end server.
+`fesvr-zynq` loads the RV64 ELF into Rocket's DRAM over the TSI serial link,
+releases the core from reset, and then services everything xv6 cannot do for
+itself:
+
+- **Console.** This Rocket configuration has *no UART at all*. xv6's output is
+  HTIF messages that fesvr turns into writes on the ARM console, and its input is
+  characters fesvr hands back the same way. That is why the port replaces
+  `uart.c` with [`xv6/htif.c`](xv6/htif.c).
+- **Disk.** `+blkdev=fs.img` is an ordinary file on the ARM side. testchipip's
+  DMA engine in the fabric pulls blocks across the same link, so
+  [`xv6/blkdev.c`](xv6/blkdev.c) replaces `virtio_disk.c`.
+
+So the ARM Linux bring-up is not a detour: without a working shell on the PS
+there is nothing to launch `fesvr-zynq`, and therefore no way to run anything on
+Rocket at all. The four bugs below were all in service of getting that far.
+
+One consequence to keep in mind: **the two processors share the same physical
+DRAM.** `rocketchip_wrapper.v` maps Rocket's `0x8xxxxxxx` onto Zynq DDR
+`0x1xxxxxxx`, so Linux has to be confined to the low 256MB or a program running
+on Rocket writes straight over the running ARM kernel — see
+[the memory split](#the-armrocket-memory-split).
+
+> Note on the name: upstream `fpga-zynq`'s own goal was booting *Linux on Rocket*.
+> That is **not** what this does. Linux here runs on the ARM core; the RISC-V core
+> runs xv6.
 
 ---
 
