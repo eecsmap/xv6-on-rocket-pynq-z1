@@ -81,6 +81,47 @@ index 0ae6896..a7d1d81 100644
 +
  // number of elements in fixed-size array
  #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
+diff --git a/kernel/kalloc.c b/kernel/kalloc.c
+index 2fcec38..bdc8251 100644
+--- a/kernel/kalloc.c
++++ b/kernel/kalloc.c
+@@ -18,6 +18,9 @@ struct run {
+   struct run *next;
+ };
+ 
++// Rocket port: set while kinit() populates the free list; see kfree().
++static int kinit_freeing;
++
+ struct {
+   struct spinlock lock;
+   struct run *freelist;
+@@ -27,7 +30,9 @@ void
+ kinit()
+ {
+   initlock(&kmem.lock, "kmem");
++  kinit_freeing = 1;
+   freerange(end, (void *)PHYSTOP);
++  kinit_freeing = 0;
+ }
+ 
+ void
+@@ -52,7 +57,15 @@ kfree(void *pa)
+     panic("kfree");
+ 
+   // Fill with junk to catch dangling refs.
+-  memset(pa, 1, PGSIZE);
++  //
++  // Rocket port: skipped while kinit() is building the initial free list.
++  // Those pages have never been allocated, so there is no dangling reference
++  // to catch, and kalloc() poisons every page it hands out anyway. The memset
++  // is not free here: it is a 25MHz core writing PHYSTOP-worth of DRAM across
++  // the FPGA fabric, which cost 27 seconds for 128MB -- the entire boot time,
++  // dwarfing even the disk I/O. Real runtime frees are still poisoned.
++  if (!kinit_freeing)
++    memset(pa, 1, PGSIZE);
+ 
+   r = (struct run *)pa;
+ 
 diff --git a/kernel/kernelvec.S b/kernel/kernelvec.S
 index 4d9ce02..5fc99bb 100644
 --- a/kernel/kernelvec.S
@@ -228,7 +269,7 @@ index df58e32..4237a50 100644
  
      __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
 diff --git a/kernel/memlayout.h b/kernel/memlayout.h
-index 4f026ed..dbca5d5 100644
+index 4f026ed..99966f7 100644
 --- a/kernel/memlayout.h
 +++ b/kernel/memlayout.h
 @@ -25,9 +25,18 @@
@@ -250,21 +291,21 @@ index 4f026ed..dbca5d5 100644
  
  // qemu puts platform-level interrupt controller (PLIC) here.
  #define PLIC                 0x0c000000L
-@@ -41,7 +50,13 @@
+@@ -41,6 +50,14 @@
  // for use by the kernel and user pages
  // from physical address 0x80000000 to PHYSTOP.
  #define KERNBASE 0x80000000L
--#define PHYSTOP  (KERNBASE + 128 * 1024 * 1024)
-+// Rocket port: 16MB, not upstream's 128MB. kinit() frees every page in this
-+// range and kfree() memsets each one to catch dangling refs, so PHYSTOP sets
-+// how much DRAM gets memset at boot. On this SoC that runs at 25MHz over the
-+// FPGA's DRAM path and costs ~27 seconds for 128MB -- which was the entire
-+// boot time, dwarfing everything else including all the disk I/O. 16MB is
-+// ample: the filesystem image is 2MB and xv6's processes here are tiny.
-+#define PHYSTOP  (KERNBASE + 16 * 1024 * 1024)
++// Upstream's 128MB. Rocket's window is 0x80000000-0x8FFFFFFF (256MB of Zynq
++// DDR), and Linux is confined to the low 256MB, so this is safe -- and
++// usertests' sbrkmuch eagerly grows a process to 100MB, so it is also the
++// minimum that passes the test suite.
++//
++// Note this is only affordable because kfree() skips its debug memset while
++// kinit() builds the free list; see kalloc.c. Poisoning 128MB at boot on this
++// SoC takes 27 seconds.
+ #define PHYSTOP  (KERNBASE + 128 * 1024 * 1024)
  
  // map the trampoline page to the highest address,
- // in both user and kernel space.
 diff --git a/kernel/proc.c b/kernel/proc.c
 index f4c1668..5a8f21e 100644
 --- a/kernel/proc.c

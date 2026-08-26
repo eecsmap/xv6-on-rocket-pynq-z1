@@ -13,8 +13,9 @@ a working boot chain on current tools, and the xv6 port itself.
 
 **Status:** working end to end. Linux boots to an interactive shell; the Rocket
 Chip core in the PL runs RISC-V programs driven from that shell; and **xv6 runs
-on Rocket with an interactive shell of its own**, off its own disk — `ls`,
-`cat`, `echo`, `grep`, `wc` and friends all work (see [`xv6/`](xv6/)).
+on Rocket with an interactive shell of its own**, off its own disk. The full
+upstream **`usertests` suite passes on the hardware** — all 64 tests, including
+the slow ones (see [`xv6/`](xv6/)).
 
 ```
 BootROM → FSBL → u-boot 2014.07 → Linux 3.15 → busybox → ~ #
@@ -402,7 +403,15 @@ wrong quietly (tty line-buffer limits, flow control, stripping).
 
 ## Next step
 
-`usertests` — the full xv6 test suite has not been run on this hardware yet, and
-it exercises far more of the kernel than an interactive shell does. Given that
-both bugs found so far were latent problems in the surrounding platform rather
-than in the port, it is the obvious place to look for the next one.
+xv6 passes `usertests` in full, so the port itself is in good shape. The obvious
+directions from here:
+
+- **Boot Linux on Rocket**, which is what upstream `fpga-zynq` was originally for
+  and what this repo's old name wrongly implied. That needs a bigger Rocket
+  config than `ZynqFPGAConfig` and a RISC-V Linux build, but the board port,
+  bitstream flow and fesvr plumbing underneath are all already working.
+- **A larger Rocket config** — more cores, an FPU, or a bigger cache — to see
+  what still fits in the xc7z020's fabric.
+- **Speed.** The core runs at 25MHz and every console character is an HTIF round
+  trip over TSI, which is why `usertests` takes an hour. Buffering console
+  writes, or giving the design a real UART, would cut that dramatically.

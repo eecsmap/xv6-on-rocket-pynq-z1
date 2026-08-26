@@ -3,9 +3,10 @@
 Porting [xv6-riscv](https://github.com/mit-pdos/xv6-riscv) to the Rocket core in
 the PL, driven by `fesvr-zynq` from ARM Linux on the PS.
 
-**Status:** working. The kernel boots, mounts the filesystem off the testchipip
-block device, runs `init`, execs `sh`, and gives an interactive shell. Console
-input and output both work, and userspace programs run.
+**Status:** working, and **the full upstream `usertests` suite passes on the
+hardware** — all 64 tests including the slow ones. The kernel boots, mounts the
+filesystem off the testchipip block device, runs `init`, execs `sh`, and gives
+an interactive shell.
 
 ```
 ~ # cd /root && ./fesvr-zynq +blkdev=fs.img ./xv6-kernel
@@ -29,7 +30,34 @@ xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
 Version 6 (v6). ...
 ```
 
-Boot to the prompt takes about 4 seconds.
+Boot to the prompt takes about **1.2 seconds**.
+
+```
+$ usertests
+usertests starting
+test copyin: OK
+test copyout: OK
+...
+test sbrkbasic: OK
+test sbrkmuch: OK
+...
+usertests slow tests starting
+test bigdir: OK
+test manywrites: OK
+test badwrite: OK
+test execout: OK
+test diskfull: balloc: out of blocks
+OK
+test outofinodes: ialloc: no inodes
+OK
+ALL TESTS PASSED
+```
+
+The suite takes a little over an hour, almost all of it console I/O rather than
+compute: `kernmem` alone deliberately faults 113 times and each report is a
+couple of lines, at roughly a millisecond per character over HTIF. `balloc: out
+of blocks` and `ialloc: no inodes` are `diskfull` and `outofinodes` doing their
+job, not errors.
 
 Apply with:
 
@@ -273,14 +301,31 @@ Three things to know:
 The MMIO page also has to be added to `kvmmake()`; without it the first register
 read takes a load page fault (`scause=0xd`, `stval=0x10015018`).
 
-### PHYSTOP is 16MB, not 128MB (`memlayout.h`)
+### Boot time: skip the free-list poison, not the memory (`kalloc.c`)
 
 `kinit()` frees every page from `end` to `PHYSTOP`, and `kfree()` memsets each
-one to catch dangling references. On this SoC that is a 25 MHz core writing over
-the FPGA's DRAM path, and 128MB of memset took **27 seconds** — which was the
-*entire* boot time, dwarfing everything else including all the disk I/O. At 16MB
-the same boot takes 3.6 seconds. The filesystem image is 2MB and the processes
-here are tiny, so 16MB is ample.
+one to `1` to catch dangling references. On this SoC that is a 25MHz core writing
+across the FPGA's DRAM path, and 128MB of it took **27 seconds** — which was the
+*entire* boot time, dwarfing everything else including all the disk I/O.
+
+The obvious fix is to shrink `PHYSTOP`, and at 16MB boot drops to 3.6s. But
+`usertests`' `sbrkmuch` eagerly grows a process to 100MB, so that trades the test
+suite for the boot time.
+
+Neither is necessary. `kalloc()` already poisons every page it hands out (with
+`5`), and pages on the *initial* free list have never been allocated, so there is
+no dangling reference for the boot-time memset to catch. It is pure cost. So
+`kfree()` skips the poison only while `kinit()` is building the list:
+
+```c
+if (!kinit_freeing)
+    memset(pa, 1, PGSIZE);
+```
+
+Real runtime frees are still poisoned, so the use-after-free detection that
+actually matters is untouched. Building the free list is then ~32K linked-list
+stores instead of 128MB of DRAM writes. `PHYSTOP` stays at upstream's 128MB and
+boot takes **1.2 seconds** — faster than the 16MB build was.
 
 ---
 
