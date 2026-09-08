@@ -530,12 +530,21 @@ Power on with the boot mode jumper on SD; the whole chain comes up by itself.
 **Do not send anything to the serial port during u-boot's autoboot countdown** —
 any keystroke stops it at `zynq-uboot>`. If that happens, type `boot`.
 
-The FTDI presents three ports; the console is the third (`/dev/ttyUSB2` here) at
-115200 8N1:
+The board's FT2232H exposes two interfaces: `if00` is JTAG, `if01` is the PS
+UART0 console, at 115200 8N1. A third `ttyUSB` appears only if some other FTDI
+device is also attached — which is where the "console is `/dev/ttyUSB2`" advice
+in earlier versions of this file came from, and why it does not travel. The
+number is not stable in any case: it moves whenever the board is power cycled
+and the bridge re-enumerates. Resolve it by name instead:
 
 ```sh
-screen /dev/ttyUSB2 115200
+screen "$(readlink -f /dev/serial/by-id/usb-Digilent*Adept*-if01-port0)" 115200
 ```
+
+To capture a boot rather than watch one, use
+[`tools/serial-listen.py`](tools/serial-listen.py) and start it *before*
+powering on — it is read-only, and it rescans so it survives the re-enumeration
+that a plain `screen` does not.
 
 (`Ctrl-A K` to quit screen.) Then, on the board:
 

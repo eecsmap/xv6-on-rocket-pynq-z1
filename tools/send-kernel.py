@@ -22,8 +22,10 @@ The transfer is md5-verified on the board before it replaces the old kernel.
 """
 
 import base64
+import glob
 import gzip
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -31,7 +33,28 @@ import time
 
 import serial
 
-PORT = "/dev/ttyUSB2"  # PYNQ-Z1 FTDI exposes 3 ports; the console is the third
+# The PYNQ-Z1's own FT2232H exposes two interfaces: 00 is JTAG, 01 is the PS
+# UART0 console. A third ttyUSB only shows up when some other FTDI device is
+# also plugged in, which is why a hardcoded /dev/ttyUSB2 works on one desk and
+# talks to the wrong device on the next. The number is not stable either -- it
+# moves every time the board is power cycled and its bridge re-enumerates. So
+# resolve by the by-id name, which does stay put, and let $XV6_CONSOLE win.
+def find_console():
+    override = os.environ.get("XV6_CONSOLE")
+    if override:
+        return override
+    byid = sorted(glob.glob(
+        "/dev/serial/by-id/usb-Digilent*Adept*-if01-port0"))
+    if byid:
+        return os.path.realpath(byid[0])
+    ports = sorted(glob.glob("/dev/ttyUSB*"))
+    if len(ports) == 1:
+        return ports[0]
+    sys.exit("cannot identify the console port; set XV6_CONSOLE=/dev/ttyUSBn "
+             "(found: %s)" % (", ".join(ports) or "none"))
+
+
+PORT = find_console()
 BAUD = 115200
 DEST = "/root/xv6-kernel"
 STRIP = "riscv64-unknown-elf-strip"

@@ -148,3 +148,9 @@ code" from "executing garbage". It requires a stopped target.
 - **USB renumbering.** The FTDI serial port moves (`ttyUSB2` → `ttyUSB4` …) after
   power cycles. Watch a range of ports, not a fixed one, and start the listener
   *before* powering on — boot output appears within ~2 s and is easily missed.
+  The trap underneath this: the node is destroyed and recreated, so a listener
+  holding an open descriptor does not merely miss the boot, it cannot detect
+  that it missed it. With the node gone `select()` never reports readable, so
+  `read()` is never called and never returns the error that reconnect logic
+  waits for. [`tools/serial-listen.py`](../tools/serial-listen.py) rescans for
+  new nodes instead of trying to notice the old one dying.
