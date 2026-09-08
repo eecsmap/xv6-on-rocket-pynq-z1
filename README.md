@@ -305,6 +305,49 @@ FSBL boots silently even when healthy.
 The BSP needs `XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ` defined (`108333333`, the
 650 MHz CPU 6x clock ÷ 6) in `xparameters_ps.h`; regenerating the BSP wipes it.
 
+### Regenerating the Rocket RTL
+
+`board/src/verilog/Top.ZynqFPGAConfig.v` is not tracked; it comes out of
+rocket-chip's Chisel build. That build is from 2018 and does not come up on a
+current machine without two fixes.
+
+**One resolver is gone.** `firrtl/project/plugins.sbt` names
+`scalasbt.artifactoryonline.com`, which has been decommissioned — DNS does not
+even resolve it, so `scalastyle-sbt-plugin`, `org.apache.ant#ant` and
+`org.ow2.asm#asm` all come back UNRESOLVED. The artifacts themselves are fine
+and still on Maven Central; only the resolver is dead. Drop that line:
+
+```bash
+git -C rocket-chip/firrtl apply /path/to/patches/rocket-chip-firrtl/0001-*.patch
+```
+
+Nothing else needs touching. sbt 1.1.1, sbt 0.13.15 (which `common/` uses — a
+different major version from rocket-chip's), all six plugins, Scala 2.11.12,
+json4s 3.5.3 and scalamacros paradise 2.1.0 all still resolve from Maven Central.
+
+**The build steps are ordered, and the order is load-bearing.** Running
+`sbt pack` first fails with `unresolved dependency:
+edu.berkeley.cs#firrtl_2.11;1.2-SNAPSHOT`, which looks like another dead
+resolver and is not: `chisel3/build.sbt` inspects the unmanaged classpath and
+only adds a *managed* dependency on firrtl when `firrtl.jar` is absent from it.
+So firrtl has to be built and dropped in `rocket-chip/lib/` first. `Makefrag`
+encodes this; if you drive sbt by hand, do the same:
+
+```bash
+make -C rocket-chip/firrtl SBT="$SBT" root_dir=$PWD/rocket-chip/firrtl build-scala
+cp rocket-chip/firrtl/utils/bin/firrtl.jar rocket-chip/lib/
+(cd rocket-chip && $SBT pack)
+(cd pynqz1 && make rocket)          # Chisel elaboration -> .fir -> firrtl -> .v
+```
+
+**Use JDK 8.** `common/Makefrag` passes `-XX:MaxPermSize` to every sbt
+invocation. On 8 that is a warning (`ignoring option MaxPermSize`); on 9 and
+later it is `Unrecognized VM option` and the JVM refuses to start. Scala 2.11.12
+wants 8 anyway.
+
+Verified end to end: with these, the regenerated `Top.ZynqFPGAConfig.v` is
+byte-identical to the one that produced the shipped bitstream.
+
 ### SD card
 
 FAT32, five files at the root:
