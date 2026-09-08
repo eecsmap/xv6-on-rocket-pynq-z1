@@ -273,6 +273,46 @@ Prerequisites: Vivado 2024.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-g
 (u-boot/kernel), the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its
 submodules.
 
+### The board file is load-bearing, and its absence is silent
+
+Of that list, the PYNQ-Z1 board files are the one that will not tell you when
+they are missing. `src/tcl/pynqz1_bd.tcl` sets exactly **one** `CONFIG.PCW_*`
+property by hand — `PCW_USE_S_AXI_HP0`. Everything else about the PS7 comes from
+a single line:
+
+```tcl
+apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
+    -config {apply_board_preset "1"} [get_bd_cells processing_system7_0]
+```
+
+That preset is where the 50 MHz reference clock, UART0 on MIO 14/15, the 512 MB
+DDR part and every PLL divider come from. Without the board file,
+`set_property board_part` fails, the automation applies nothing, and the PS7
+falls back to defaults that carry **Zedboard's 33.333 MHz** reference clock.
+
+Synthesis, placement, routing and `write_bitstream` all still succeed. The
+design comes up on the board. The only symptom is an unreadable console — which
+is [bug #2/#3](#2--3-garbled-console--the-same-bug-in-two-codebases) all over
+again, reintroduced at the point where it is hardest to recognise as a
+configuration problem rather than a software one.
+
+Get them from [Digilent/vivado-boards](https://github.com/Digilent/vivado-boards)
+and point Vivado at the directory containing `pynq-z1/`:
+
+```tcl
+set_param board.repoPaths [list /path/to/vivado-boards/new/board_files]
+```
+
+Then check that it took, before trusting anything downstream:
+
+```bash
+cd pynqz1 && vivado -mode batch -source check_ps7.tcl
+```
+
+`board/check_ps7.tcl` reads the properties back off the block design and fails
+loudly if the crystal is not 50 MHz. It is the only place in the flow where this
+mistake is cheap to catch.
+
 Because the upstream sources predate GCC 5, both builds need extra flags. The
 patches under `patches/` cover the source-level fixes; these are the build
 invocations:
