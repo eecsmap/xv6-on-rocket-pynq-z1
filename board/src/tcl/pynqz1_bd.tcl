@@ -20,14 +20,23 @@ set script_folder [_tcl::get_script_folder]
 ################################################################
 # Check if script is running in correct Vivado version.
 ################################################################
-set scripts_vivado_version 2024.1
+# Vivado's generated check is a hard `return 1` on any version mismatch. That is
+# too strict here: this design has been built end to end on both 2024.1 and
+# 2025.2.1 with no other change, because the three IP it instantiates
+# (processing_system7 5.5, axi_interconnect 2.1, proc_sys_reset 5.0) still carry
+# those version numbers, and the 2015-era flow names in the project script are
+# still accepted. So verified versions pass, and anything else warns rather than
+# aborting -- run `report_ip_status` if you land here.
+set verified_vivado_versions {2024.1 2025.2.1}
 set current_vivado_version [version -short]
 
-if { [string first $scripts_vivado_version $current_vivado_version] == -1 } {
+set matched 0
+foreach v $verified_vivado_versions {
+   if { [string first $v $current_vivado_version] != -1 } { set matched 1 }
+}
+if { !$matched } {
    puts ""
-   catch {common::send_msg_id "BD_TCL-109" "ERROR" "This script was generated using Vivado <$scripts_vivado_version> and is being run in <$current_vivado_version> of Vivado. Please run the script in Vivado <$scripts_vivado_version> then open the design in Vivado <$current_vivado_version>. Upgrade the design by running \"Tools => Report => Report IP Status...\", then run write_bd_tcl to create an updated script."}
-
-   return 1
+   catch {common::send_msg_id "BD_TCL-109" "WARNING" "This block design has been verified on Vivado <$verified_vivado_versions> and is running in <$current_vivado_version>. Continuing. If the build misbehaves, check \"Tools => Report => Report IP Status\" and regenerate this script with write_bd_tcl."}
 }
 
 ################################################################

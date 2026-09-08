@@ -243,6 +243,45 @@ Logic Levels:     36  (CARRY4=19  LUT2=2 LUT3=3 LUT4=4 LUT5=1 LUT6=7)
 the broadcast hub's mask RAM. 21.222 ns puts the ceiling at about **47 MHz**
 without touching RTL; going higher means pipelining that path.
 
+### The same design under Vivado 2025.2.1
+
+Built again with everything held constant except the tool version — same
+`Top.ZynqFPGAConfig.v`, same constraints, same board files, same
+`Vivado Implementation Defaults`. It closes, and the bitstream boots xv6 on
+hardware, but with noticeably less margin:
+
+| | 2024.1 | 2025.2.1 |
+|---|---|---|
+| WNS (40 MHz) | +3.395 ns | **+1.542 ns** |
+| Failing endpoints | 0 | 0 |
+| Slices occupied | 9723 (73.11%) | 9633 (72.43%) |
+| Slice LUTs | 30761 | 30662 |
+| BRAM / DSP / MMCM | 24 / 15 / 1 | 24 / 15 / 1 |
+
+Resource usage is unchanged, marginally better. The 1.853 ns goes entirely into
+delay: **route +1.227 ns, logic +0.531 ns, clock skew +0.095 ns**.
+
+It is not one path getting unlucky. The critical endpoint moves — 2024.1 ends in
+`bh/TLBroadcastTracker_3`, 2025.2.1 in `pbus/sync_xing/Queue` — but the source is
+the same `adapter/addr_reg[*]`, the shape is the same (36 logic levels,
+`CARRY4=19` both), and the whole critical cluster shifts together: the ten worst
+paths span 3.395–3.614 ns under 2024.1 and 1.542–1.822 ns under 2025.2.1. Same
+netlist, worse physical implementation of it. `report_design_analysis
+-congestion` finds no window above level 5 in either, so this is distance, not
+congestion.
+
+Practically: 40 MHz still has room, but the ceiling estimated above drops from
+about 46 MHz to about 43 MHz, and the 50 MHz setting that closed at +0.249 ns on
+2024.1 should be assumed not to close here.
+
+**`phys_opt_design` does not help.** It is disabled in
+`Vivado Implementation Defaults`, and turning it on — plus
+`post_route_phys_opt_design` — changes nothing at all: identical WNS to three
+decimals on all ten worst paths. It reports `TNS=0.000` and exits, because it
+optimises paths with *negative* slack and this design has none. Physical
+optimisation is not a way to buy margin on a design that already passes; the
+lever for that is still pipelining the adapter-to-broadcast-hub path.
+
 ### Why a bigger cache is not the next move
 
 BRAM sits at 17%, which invites the idea of enlarging the caches. It would not
@@ -269,7 +308,7 @@ build, so it is not a one-line experiment.
 
 ## Building
 
-Prerequisites: Vivado 2024.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
+Prerequisites: Vivado 2024.1 or 2025.2.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
 (u-boot/kernel), the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its
 submodules.
 
