@@ -270,6 +270,13 @@ netlist, worse physical implementation of it. `report_design_analysis
 -congestion` finds no window above level 5 in either, so this is distance, not
 congestion.
 
+`usertests` settles what that costs at runtime: **nothing**. The full 64-test
+suite passes on the 2025.2.1 bitstream in **1482 s** — the same figure as the
+2024.1 build, to the second. Which on reflection is the only possible answer:
+WNS says whether a clock period is met, not how many periods the work takes, and
+with the same 40 MHz clock driving byte-identical RTL the cycle count cannot
+move. Less slack means closer to failing, not slower.
+
 Practically: 40 MHz still has room, but the ceiling estimated above drops from
 about 46 MHz to about 43 MHz, and the 50 MHz setting that closed at +0.249 ns on
 2024.1 should be assumed not to close here.
