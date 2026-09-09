@@ -1,0 +1,11 @@
+diff --git a/project/plugins.sbt b/project/plugins.sbt
+index 40490350..f70c2a2c 100644
+--- a/project/plugins.sbt
++++ b/project/plugins.sbt
+@@ -1,4 +1,5 @@
+-resolvers += Resolver.url("scalasbt", new URL("http://scalasbt.artifactoryonline.com/scalasbt/sbt-plugin-releases")) (Resolver.ivyStylePatterns)
++// PATCHED: scalasbt.artifactoryonline.com was decommissioned; DNS no longer resolves.
++// Classpaths.sbtPluginReleases below plus Maven Central should cover these.
+ 
+ resolvers += Classpaths.sbtPluginReleases
+ 

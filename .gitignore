@@ -20,6 +20,8 @@ board/src/verilog/AsyncResetReg.v
 board/src/verilog/plusarg_reader.v
 
 # Build intermediates
+# riscv-test's output has no extension, so *.elf below does not catch it.
+riscv-test/hello.riscv
 # NB: no bare `*.d` here -- it also matches the rootfs/etc/init.d directory.
 *.o
 *.a

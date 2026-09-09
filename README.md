@@ -243,6 +243,52 @@ Logic Levels:     36  (CARRY4=19  LUT2=2 LUT3=3 LUT4=4 LUT5=1 LUT6=7)
 the broadcast hub's mask RAM. 21.222 ns puts the ceiling at about **47 MHz**
 without touching RTL; going higher means pipelining that path.
 
+### The same design under Vivado 2025.2.1
+
+Built again with everything held constant except the tool version — same
+`Top.ZynqFPGAConfig.v`, same constraints, same board files, same
+`Vivado Implementation Defaults`. It closes, and the bitstream boots xv6 on
+hardware, but with noticeably less margin:
+
+| | 2024.1 | 2025.2.1 |
+|---|---|---|
+| WNS (40 MHz) | +3.395 ns | **+1.542 ns** |
+| Failing endpoints | 0 | 0 |
+| Slices occupied | 9723 (73.11%) | 9633 (72.43%) |
+| Slice LUTs | 30761 | 30662 |
+| BRAM / DSP / MMCM | 24 / 15 / 1 | 24 / 15 / 1 |
+
+Resource usage is unchanged, marginally better. The 1.853 ns goes entirely into
+delay: **route +1.227 ns, logic +0.531 ns, clock skew +0.095 ns**.
+
+It is not one path getting unlucky. The critical endpoint moves — 2024.1 ends in
+`bh/TLBroadcastTracker_3`, 2025.2.1 in `pbus/sync_xing/Queue` — but the source is
+the same `adapter/addr_reg[*]`, the shape is the same (36 logic levels,
+`CARRY4=19` both), and the whole critical cluster shifts together: the ten worst
+paths span 3.395–3.614 ns under 2024.1 and 1.542–1.822 ns under 2025.2.1. Same
+netlist, worse physical implementation of it. `report_design_analysis
+-congestion` finds no window above level 5 in either, so this is distance, not
+congestion.
+
+`usertests` settles what that costs at runtime: **nothing**. The full 64-test
+suite passes on the 2025.2.1 bitstream in **1482 s** — the same figure as the
+2024.1 build, to the second. Which on reflection is the only possible answer:
+WNS says whether a clock period is met, not how many periods the work takes, and
+with the same 40 MHz clock driving byte-identical RTL the cycle count cannot
+move. Less slack means closer to failing, not slower.
+
+Practically: 40 MHz still has room, but the ceiling estimated above drops from
+about 46 MHz to about 43 MHz, and the 50 MHz setting that closed at +0.249 ns on
+2024.1 should be assumed not to close here.
+
+**`phys_opt_design` does not help.** It is disabled in
+`Vivado Implementation Defaults`, and turning it on — plus
+`post_route_phys_opt_design` — changes nothing at all: identical WNS to three
+decimals on all ten worst paths. It reports `TNS=0.000` and exits, because it
+optimises paths with *negative* slack and this design has none. Physical
+optimisation is not a way to buy margin on a design that already passes; the
+lever for that is still pipelining the adapter-to-broadcast-hub path.
+
 ### Why a bigger cache is not the next move
 
 BRAM sits at 17%, which invites the idea of enlarging the caches. It would not
@@ -269,9 +315,60 @@ build, so it is not a one-line experiment.
 
 ## Building
 
-Prerequisites: Vivado 2024.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
-(u-boot/kernel), the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its
-submodules.
+Prerequisites: Vivado 2024.1 or 2025.2.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
+(u-boot/kernel), `riscv64-unknown-elf-gcc` (xv6), `openjdk-8` (the Chisel build),
+the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its submodules.
+
+[**vivado-docker**](https://github.com/eecsmap/vivado-docker) is a container
+with all of that already in it, pinned to an OS Vivado supports. It is what this
+was last built and verified on, and it saves rediscovering which of these are
+`Recommends` that a `--no-install-recommends` install quietly leaves out.
+
+### The board file is load-bearing, and its absence is silent
+
+Of that list, the PYNQ-Z1 board files are the one that will not tell you when
+they are missing. `src/tcl/pynqz1_bd.tcl` sets exactly **one** `CONFIG.PCW_*`
+property by hand — `PCW_USE_S_AXI_HP0`. Everything else about the PS7 comes from
+a single line:
+
+```tcl
+apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
+    -config {apply_board_preset "1"} [get_bd_cells processing_system7_0]
+```
+
+That preset is where the 50 MHz reference clock, UART0 on MIO 14/15, the 512 MB
+DDR part and every PLL divider come from. Without the board file,
+`set_property board_part` fails, the automation applies nothing, and the PS7
+falls back to defaults that carry **Zedboard's 33.333 MHz** reference clock.
+
+Synthesis, placement, routing and `write_bitstream` all still succeed. The
+design comes up on the board. The only symptom is an unreadable console — which
+is [bug #2/#3](#2--3-garbled-console--the-same-bug-in-two-codebases) all over
+again, reintroduced at the point where it is hardest to recognise as a
+configuration problem rather than a software one.
+
+Get them from [Digilent/vivado-boards](https://github.com/Digilent/vivado-boards)
+and point Vivado at the directory containing `pynq-z1/`:
+
+```tcl
+set_param board.repoPaths [list /path/to/vivado-boards/new/board_files]
+```
+
+Then check that it took, before trusting anything downstream:
+
+```bash
+cd pynqz1 && vivado -mode batch -source check_ps7.tcl
+```
+
+`board/check_ps7.tcl` reads the properties back off the block design and fails
+loudly if the crystal is not 50 MHz. It is the only place in the flow where this
+mistake is cheap to catch.
+
+**There are scripts for all of this.** [`scripts/`](scripts/) rebuilds the whole
+chain — RTL, FSBL, u-boot, kernel, rootfs — and has been run end to end on
+Vivado 2025.2.1 / Ubuntu 24.04, booting to an xv6 shell on hardware. Start from
+[`scripts/README.md`](scripts/README.md); what follows is the reasoning behind
+what those scripts do.
 
 Because the upstream sources predate GCC 5, both builds need extra flags. The
 patches under `patches/` cover the source-level fixes; these are the build
@@ -302,8 +399,97 @@ bootgen -image output.bif -w -o boot.bin
 `FSBL_DEBUG_INFO` matters: without it every `fsbl_printf` is compiled out and
 FSBL boots silently even when healthy.
 
+### The FSBL on Vitis 2025.x
+
+The invocations above are the classic flow. `xsct`, which generated that BSP,
+does not exist in Vitis 2025.x, and Vitis's own `create_platform_component`
+fails here with nothing to go on but `Application error processing RPC`. The
+path that works is `empyro`, and `zynq_fsbl` is accepted as a template even
+though it is not in the advertised list:
+
+```bash
+empyro repo -st $VITIS/data/embeddedsw
+empyro create_bsp -t zynq_fsbl -p ps7_cortexa9_0 -s <sdt>/system-top.dts -w bsp
+empyro build_bsp  -d bsp
+empyro create_app -t zynq_fsbl -d bsp -n fsbl -w app
+empyro build_app  -w app
+```
+
+`fsbl/main.c` and `fsbl/stack_init_override.c` go in through
+`UserConfig.cmake`'s `USER_COMPILE_SOURCES` and `USER_COMPILE_DEFINITIONS`.
+[`scripts/build-fsbl.sh`](scripts/build-fsbl.sh) does the whole thing.
+
+One consequence worth recording: **[bug #1](#1-fsbl-crashed-before-printing-a-single-byte)
+does not exist on this path.** The 2025.x standalone BSP enters through its own
+`_start` rather than newlib's `_mainCRTStartup`, so `_stack_init` is never
+called and `--gc-sections` drops it. The 2024.1 FSBL binary contains both
+symbols; the 2025.2.1 one contains neither, and boots. The override is kept
+because it costs nothing and the classic flow still needs it.
+
+### The kernel needs three flags this section used to omit
+
+```
+HOSTCFLAGS="-fcommon"                 # scripts/dtc, duplicate yylloc
+KCFLAGS="-fcommon -fgnu89-inline"     # target code
+dtc -i <kernel>/arch/arm/boot/dts     # the .dts includes zynq-7000.dtsi
+```
+
+`-fgnu89-inline` is the one that costs an afternoon. gnu89 and C99 give
+`extern inline` opposite meanings; 3.15 assumes gnu89, where it emits nothing,
+and a current GCC emits a definition per translation unit. It presents as
+`arch/arm/mm` symbols — `nop_dma_map_area` — multiply defined in `fs/ext4`
+object files.
+
+And on the fesvr link line, `-lfesvr` must come *after* the sources. `Makefrag`
+puts it first, which was fine when ld scanned libraries regardless of position;
+it now resolves left to right, and `context_t::switch_to()` comes back
+undefined.
+
 The BSP needs `XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ` defined (`108333333`, the
 650 MHz CPU 6x clock ÷ 6) in `xparameters_ps.h`; regenerating the BSP wipes it.
+
+### Regenerating the Rocket RTL
+
+`board/src/verilog/Top.ZynqFPGAConfig.v` is not tracked; it comes out of
+rocket-chip's Chisel build. That build is from 2018 and does not come up on a
+current machine without two fixes.
+
+**One resolver is gone.** `firrtl/project/plugins.sbt` names
+`scalasbt.artifactoryonline.com`, which has been decommissioned — DNS does not
+even resolve it, so `scalastyle-sbt-plugin`, `org.apache.ant#ant` and
+`org.ow2.asm#asm` all come back UNRESOLVED. The artifacts themselves are fine
+and still on Maven Central; only the resolver is dead. Drop that line:
+
+```bash
+git -C rocket-chip/firrtl apply /path/to/patches/rocket-chip-firrtl/0001-*.patch
+```
+
+Nothing else needs touching. sbt 1.1.1, sbt 0.13.15 (which `common/` uses — a
+different major version from rocket-chip's), all six plugins, Scala 2.11.12,
+json4s 3.5.3 and scalamacros paradise 2.1.0 all still resolve from Maven Central.
+
+**The build steps are ordered, and the order is load-bearing.** Running
+`sbt pack` first fails with `unresolved dependency:
+edu.berkeley.cs#firrtl_2.11;1.2-SNAPSHOT`, which looks like another dead
+resolver and is not: `chisel3/build.sbt` inspects the unmanaged classpath and
+only adds a *managed* dependency on firrtl when `firrtl.jar` is absent from it.
+So firrtl has to be built and dropped in `rocket-chip/lib/` first. `Makefrag`
+encodes this; if you drive sbt by hand, do the same:
+
+```bash
+make -C rocket-chip/firrtl SBT="$SBT" root_dir=$PWD/rocket-chip/firrtl build-scala
+cp rocket-chip/firrtl/utils/bin/firrtl.jar rocket-chip/lib/
+(cd rocket-chip && $SBT pack)
+(cd pynqz1 && make rocket)          # Chisel elaboration -> .fir -> firrtl -> .v
+```
+
+**Use JDK 8.** `common/Makefrag` passes `-XX:MaxPermSize` to every sbt
+invocation. On 8 that is a warning (`ignoring option MaxPermSize`); on 9 and
+later it is `Unrecognized VM option` and the JVM refuses to start. Scala 2.11.12
+wants 8 anyway.
+
+Verified end to end: with these, the regenerated `Top.ZynqFPGAConfig.v` is
+byte-identical to the one that produced the shipped bitstream.
 
 ### SD card
 
@@ -408,12 +594,21 @@ Power on with the boot mode jumper on SD; the whole chain comes up by itself.
 **Do not send anything to the serial port during u-boot's autoboot countdown** —
 any keystroke stops it at `zynq-uboot>`. If that happens, type `boot`.
 
-The FTDI presents three ports; the console is the third (`/dev/ttyUSB2` here) at
-115200 8N1:
+The board's FT2232H exposes two interfaces: `if00` is JTAG, `if01` is the PS
+UART0 console, at 115200 8N1. A third `ttyUSB` appears only if some other FTDI
+device is also attached — which is where the "console is `/dev/ttyUSB2`" advice
+in earlier versions of this file came from, and why it does not travel. The
+number is not stable in any case: it moves whenever the board is power cycled
+and the bridge re-enumerates. Resolve it by name instead:
 
 ```sh
-screen /dev/ttyUSB2 115200
+screen "$(readlink -f /dev/serial/by-id/usb-Digilent*Adept*-if01-port0)" 115200
 ```
+
+To capture a boot rather than watch one, use
+[`tools/serial-listen.py`](tools/serial-listen.py) and start it *before*
+powering on — it is read-only, and it rescans so it survives the re-enumeration
+that a plain `screen` does not.
 
 (`Ctrl-A K` to quit screen.) Then, on the board:
 
@@ -442,7 +637,7 @@ While iterating that is a feature — a reboot is a guaranteed clean slate, and 
 is the easiest way to restore a damaged `fs.img`. To make a change permanent,
 rebuild the ramdisk and rewrite the card.
 
-### Iterating on the RV64 kernel
+### Iterating without touching the SD card
 
 Because the rootfs is in RAM, a rebuilt kernel can go straight down the console
 rather than via the SD card:
@@ -455,6 +650,29 @@ make kernel/kernel                                    # in your xv6 tree
 About 13 seconds to push, 4 to boot. See
 [`tools/send-kernel.py`](tools/send-kernel.py) for the several ways this can go
 wrong quietly (tty line-buffer limits, flow control, stripping).
+
+The destination is an argument, and the transport does not care what it is
+carrying, so **anything in the RAM rootfs** can be replaced the same way — a
+library, `fs.img`, `fesvr-zynq`. That is usually faster than rebuilding the
+ramdisk and moving the card, and it is the only option when the card is not to
+hand:
+
+```sh
+tools/send-kernel.py libstdc++.so.6 /lib/libstdc++.so.6
+tools/send-kernel.py fs.img         /root/fs.img.orig
+```
+
+What each change actually costs:
+
+| changed | how to get it onto the board |
+|---|---|
+| xv6 kernel, `fs.img`, anything under the RAM rootfs | `send-kernel.py`, seconds, board stays up |
+| bitstream only | JTAG — see [`docs/JTAG-DEBUGGING.md`](docs/JTAG-DEBUGGING.md) |
+| `uImage`, `devicetree.dtb`, `uramdisk.image.gz` | SD card, or teach u-boot to TFTP them (`Net: Gem.e000b000` is up) |
+| `boot.bin` — FSBL or u-boot itself | SD card |
+
+Only the last row genuinely requires the card. It is worth knowing which row you
+are in before pulling the board apart.
 
 ---
 
