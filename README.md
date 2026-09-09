@@ -309,8 +309,13 @@ build, so it is not a one-line experiment.
 ## Building
 
 Prerequisites: Vivado 2024.1 or 2025.2.1, `arm-none-eabi-gcc` (FSBL), `arm-linux-gnueabihf-gcc`
-(u-boot/kernel), the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its
-submodules.
+(u-boot/kernel), `riscv64-unknown-elf-gcc` (xv6), `openjdk-8` (the Chisel build),
+the PYNQ-Z1 board files, and a `fpga-zynq` checkout with its submodules.
+
+[**vivado-docker**](https://github.com/eecsmap/vivado-docker) is a container
+with all of that already in it, pinned to an OS Vivado supports. It is what this
+was last built and verified on, and it saves rediscovering which of these are
+`Recommends` that a `--no-install-recommends` install quietly leaves out.
 
 ### The board file is load-bearing, and its absence is silent
 
