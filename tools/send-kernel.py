@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Push a freshly built RV64 kernel to the board over the serial console.
+"""Push a file to the board over the serial console.
 
 The board's rootfs is an initramfs living in RAM, so a new kernel can be dropped
 straight into /root without touching the SD card. That turns the edit/test cycle
 into about 13 seconds instead of a card swap.
 
     ./tools/send-kernel.py ~/xv6-riscv/kernel/kernel
+    ./tools/send-kernel.py fs.img /root/fs.img.orig
+    ./tools/send-kernel.py libstdc++.so.6 /lib/libstdc++.so.6
+
+Named for its usual job, but the transport is general and the destination is an
+argument. Anything in the RAM rootfs can be replaced this way, which is often
+faster than rebuilding the ramdisk and moving the SD card -- and is the only
+option if the card is not to hand.
 
 Four things this gets right, each of which cost a debugging session to learn:
 
@@ -59,22 +66,44 @@ BAUD = 115200
 DEST = "/root/xv6-kernel"
 STRIP = "riscv64-unknown-elf-strip"
 
+EM_RISCV = 243
+
+
+def _elf_machine(path):
+    """e_machine, or None if this is not an ELF."""
+    with open(path, "rb") as f:
+        head = f.read(20)
+    if head[:4] != b"\x7fELF":
+        return None
+    little = head[5] == 1
+    return int.from_bytes(head[18:20], "little" if little else "big")
+
+
 CHUNK_LINE = 76
 DELAY = 0.004  # per line; the 115200 line itself caps throughput at ~11.5 KB/s
 
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit(f"usage: {sys.argv[0]} <kernel-elf> [dest] [port]")
+        sys.exit(f"usage: {sys.argv[0]} <file> [dest] [port]")
     src = sys.argv[1]
     dest = sys.argv[2] if len(sys.argv) > 2 else DEST
     port = sys.argv[3] if len(sys.argv) > 3 else PORT
 
-    stripped = "/tmp/send-kernel-payload"
-    shutil.copy(src, stripped)
-    subprocess.check_call([STRIP, "--strip-debug", stripped])
+    # Strip only what there is a stripper for. The debug-info saving is huge on
+    # an xv6 kernel and this started life as a kernel-only tool, but the
+    # transport underneath is general: the rootfs lives in RAM, so any file can
+    # be replaced this way without touching the SD card. Stripping an ARM
+    # library with the RISC-V strip would corrupt it, so decide from the ELF
+    # header rather than assuming.
+    payload = "/tmp/send-kernel-payload"
+    shutil.copy(src, payload)
+    if _elf_machine(payload) == EM_RISCV and shutil.which(STRIP):
+        subprocess.check_call([STRIP, "--strip-debug", payload])
+    else:
+        print("not a RISC-V ELF -- sending as is")
 
-    raw = open(stripped, "rb").read()
+    raw = open(payload, "rb").read()
     md5 = hashlib.md5(raw).hexdigest()
     b64 = base64.b64encode(gzip.compress(raw, 9))
     lines = [b64[i:i + CHUNK_LINE] for i in range(0, len(b64), CHUNK_LINE)]

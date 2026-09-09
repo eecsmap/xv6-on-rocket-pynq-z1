@@ -637,7 +637,7 @@ While iterating that is a feature — a reboot is a guaranteed clean slate, and 
 is the easiest way to restore a damaged `fs.img`. To make a change permanent,
 rebuild the ramdisk and rewrite the card.
 
-### Iterating on the RV64 kernel
+### Iterating without touching the SD card
 
 Because the rootfs is in RAM, a rebuilt kernel can go straight down the console
 rather than via the SD card:
@@ -650,6 +650,29 @@ make kernel/kernel                                    # in your xv6 tree
 About 13 seconds to push, 4 to boot. See
 [`tools/send-kernel.py`](tools/send-kernel.py) for the several ways this can go
 wrong quietly (tty line-buffer limits, flow control, stripping).
+
+The destination is an argument, and the transport does not care what it is
+carrying, so **anything in the RAM rootfs** can be replaced the same way — a
+library, `fs.img`, `fesvr-zynq`. That is usually faster than rebuilding the
+ramdisk and moving the card, and it is the only option when the card is not to
+hand:
+
+```sh
+tools/send-kernel.py libstdc++.so.6 /lib/libstdc++.so.6
+tools/send-kernel.py fs.img         /root/fs.img.orig
+```
+
+What each change actually costs:
+
+| changed | how to get it onto the board |
+|---|---|
+| xv6 kernel, `fs.img`, anything under the RAM rootfs | `send-kernel.py`, seconds, board stays up |
+| bitstream only | JTAG — see [`docs/JTAG-DEBUGGING.md`](docs/JTAG-DEBUGGING.md) |
+| `uImage`, `devicetree.dtb`, `uramdisk.image.gz` | SD card, or teach u-boot to TFTP them (`Net: Gem.e000b000` is up) |
+| `boot.bin` — FSBL or u-boot itself | SD card |
+
+Only the last row genuinely requires the card. It is worth knowing which row you
+are in before pulling the board apart.
 
 ---
 
