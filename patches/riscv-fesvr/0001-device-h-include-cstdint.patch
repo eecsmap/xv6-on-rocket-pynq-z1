@@ -1,0 +1,12 @@
+diff --git a/fesvr/device.h b/fesvr/device.h
+index 1f12067..0eed285 100644
+--- a/fesvr/device.h
++++ b/fesvr/device.h
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include <string>
+ #include <functional>
++#include <cstdint>
+ 
+ class htif_t;
+ 
