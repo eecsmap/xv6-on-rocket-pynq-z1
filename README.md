@@ -352,6 +352,12 @@ cd pynqz1 && vivado -mode batch -source check_ps7.tcl
 loudly if the crystal is not 50 MHz. It is the only place in the flow where this
 mistake is cheap to catch.
 
+**There are scripts for all of this.** [`scripts/`](scripts/) rebuilds the whole
+chain — RTL, FSBL, u-boot, kernel, rootfs — and has been run end to end on
+Vivado 2025.2.1 / Ubuntu 24.04, booting to an xv6 shell on hardware. Start from
+[`scripts/README.md`](scripts/README.md); what follows is the reasoning behind
+what those scripts do.
+
 Because the upstream sources predate GCC 5, both builds need extra flags. The
 patches under `patches/` cover the source-level fixes; these are the build
 invocations:
@@ -380,6 +386,52 @@ bootgen -image output.bif -w -o boot.bin
 
 `FSBL_DEBUG_INFO` matters: without it every `fsbl_printf` is compiled out and
 FSBL boots silently even when healthy.
+
+### The FSBL on Vitis 2025.x
+
+The invocations above are the classic flow. `xsct`, which generated that BSP,
+does not exist in Vitis 2025.x, and Vitis's own `create_platform_component`
+fails here with nothing to go on but `Application error processing RPC`. The
+path that works is `empyro`, and `zynq_fsbl` is accepted as a template even
+though it is not in the advertised list:
+
+```bash
+empyro repo -st $VITIS/data/embeddedsw
+empyro create_bsp -t zynq_fsbl -p ps7_cortexa9_0 -s <sdt>/system-top.dts -w bsp
+empyro build_bsp  -d bsp
+empyro create_app -t zynq_fsbl -d bsp -n fsbl -w app
+empyro build_app  -w app
+```
+
+`fsbl/main.c` and `fsbl/stack_init_override.c` go in through
+`UserConfig.cmake`'s `USER_COMPILE_SOURCES` and `USER_COMPILE_DEFINITIONS`.
+[`scripts/build-fsbl.sh`](scripts/build-fsbl.sh) does the whole thing.
+
+One consequence worth recording: **[bug #1](#1-fsbl-crashed-before-printing-a-single-byte)
+does not exist on this path.** The 2025.x standalone BSP enters through its own
+`_start` rather than newlib's `_mainCRTStartup`, so `_stack_init` is never
+called and `--gc-sections` drops it. The 2024.1 FSBL binary contains both
+symbols; the 2025.2.1 one contains neither, and boots. The override is kept
+because it costs nothing and the classic flow still needs it.
+
+### The kernel needs three flags this section used to omit
+
+```
+HOSTCFLAGS="-fcommon"                 # scripts/dtc, duplicate yylloc
+KCFLAGS="-fcommon -fgnu89-inline"     # target code
+dtc -i <kernel>/arch/arm/boot/dts     # the .dts includes zynq-7000.dtsi
+```
+
+`-fgnu89-inline` is the one that costs an afternoon. gnu89 and C99 give
+`extern inline` opposite meanings; 3.15 assumes gnu89, where it emits nothing,
+and a current GCC emits a definition per translation unit. It presents as
+`arch/arm/mm` symbols — `nop_dma_map_area` — multiply defined in `fs/ext4`
+object files.
+
+And on the fesvr link line, `-lfesvr` must come *after* the sources. `Makefrag`
+puts it first, which was fine when ld scanned libraries regardless of position;
+it now resolves left to right, and `context_t::switch_to()` comes back
+undefined.
 
 The BSP needs `XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ` defined (`108333333`, the
 650 MHz CPU 6x clock ÷ 6) in `xparameters_ps.h`; regenerating the BSP wipes it.
