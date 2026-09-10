@@ -248,7 +248,15 @@ without touching RTL; going higher means pipelining that path.
 Built again with everything held constant except the tool version — same
 `Top.ZynqFPGAConfig.v`, same constraints, same board files, same
 `Vivado Implementation Defaults`. It closes, and the bitstream boots xv6 on
-hardware, but with noticeably less margin:
+hardware, but with noticeably less margin.
+
+The two builds were later repeated on one machine, in one container image, with
+both Vivado versions installed side by side, because the original comparison
+spanned two machines and two Ubuntu point releases and so could not honestly be
+pinned on the tool. Rebuilding under 2024.1 there reproduced the earlier numbers
+exactly — WNS +3.395 ns, 9723 slices — so the difference below is the tool
+version and nothing else. It also means Vivado's place-and-route is
+deterministic across machines given the same version, inputs and options.
 
 | | 2024.1 | 2025.2.1 |
 |---|---|---|
